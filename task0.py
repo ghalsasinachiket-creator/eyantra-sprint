@@ -10,7 +10,7 @@ Filename:        task0.py
 Created:         29/05/2026
 Last Modified:   29/05/2026
 Author:          e-Yantra Team
-Team ID:         [ XXX ]
+Team ID:         [ 403 ]
 This software is made available on an "AS IS WHERE IS BASIS".
 Licensee/end user indemnifies and will keep e-Yantra indemnified from
 any and all claim(s) that emanate from the use of the Software or
@@ -166,7 +166,22 @@ def control_loop(c):
     - set_motor(c, left_speed, right_speed): Control motor speeds
     - Access sensor data via: c.sensor_values[index] and c.sensor_count
     """
+    BLACK = 0.2  # Example threshold for black line detection (adjust based on your sensors)
     while c.running:
+        if c.sensor_count >=5:
+            left = c.sensor_values[1]
+            center = c.sensor_values[2]
+            right = c.sensor_values[3]
+
+            if center < BLACK:
+                set_motor(c,1.5,1.5) #go straight
+            elif left < BLACK:
+                set_motor(c,0.5,1.5)     #turn left
+            elif right < BLACK:
+                set_motor(c,1.5,0.5)     #turn right
+            else:
+                set_motor(c,0.0,0.0)     #stop
+        time.sleep(0.1)  # Control loop delay (adjust as needed)
         # TODO: Implement your robot control logic here
         #
         # Examples of what you can do:
@@ -176,11 +191,17 @@ def control_loop(c):
         #    set_motor(c, -1.5, 1.5)   # Turn left
         #    set_motor(c, 1.5, -1.5)   # Turn right
         #    set_motor(c, -1.5, -1.5)  # Move backward
+        #for _ in range(4):
+          #  set_motor(c,1.5,1.5)
+          #  time.sleep(2.0)
+
+          #  set_motor(c,-1.5,-1.5)
+          #  time.sleep(1.0)
 
         # Default behavior: Stop the robot
         # Replace this with your control logic
-        set_motor(c, 2.0, 2.0)
-        time.sleep(2.0)  # Wait 2 seconds before next iteration
+        #set_motor(c, 0.0,0.0)
+        #break # Wait 2 seconds before next iteration
 
 
 def main():
