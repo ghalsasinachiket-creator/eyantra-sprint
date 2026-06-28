@@ -91,7 +91,12 @@ def get_state(sensors):
         it can take should be finite and reasonably small.
 
     """
-    return tuple(1 if sensors[name] < LINE_THRESHOLD else 0 for name in SENSOR_ORDER)
+    left_corner = 1 if sensors['left_corner'] < LINE_THRESHOLD else 0
+    left = 1 if sensors['left'] < LINE_THRESHOLD else 0
+    middle = 1 if sensors['middle'] < LINE_THRESHOLD else 0
+    right = 1 if sensors['right'] < LINE_THRESHOLD else 0
+    right_corner = 1 if sensors['right_corner'] < LINE_THRESHOLD else 0
+    return (left_corner, left, middle, right, right_corner)
 
 
 def get_reward(sensors, state):
@@ -137,11 +142,17 @@ def choose_action(agent, state, training):
     q_values = agent.q_table[state]
     best_action = 0
     best_value = q_values[0]
+    ties = 1
     for action in range(1, agent.n_actions):
         value = q_values[action]
         if value > best_value:
             best_action = action
             best_value = value
+            ties = 1
+        elif value == best_value:
+            ties += 1
+            if random.randrange(ties) == 0:
+                best_action = action
     return best_action
 
 
