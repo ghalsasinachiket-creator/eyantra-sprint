@@ -54,6 +54,30 @@ LINE_THRESHOLD = 0.5
 LINE_WEIGHTS = (0.25, 1.0, 2.0, 1.0, 0.25)
 
 
+def _reward_for_state(state):
+    line_count = sum(state)
+    if line_count == 0:
+        return -5.0
+
+    reward = sum(weight for active, weight in zip(state, LINE_WEIGHTS) if active)
+    if state[2]:
+        reward += 2.0
+    if state[0] or state[4]:
+        reward -= 1.0
+    if line_count > 2:
+        reward -= 0.5 * (line_count - 2)
+
+    return reward
+
+
+REWARD_BY_STATE = {
+    tuple((mask >> bit) & 1 for bit in range(4, -1, -1)): _reward_for_state(
+        tuple((mask >> bit) & 1 for bit in range(4, -1, -1))
+    )
+    for mask in range(32)
+}
+
+
 def get_state(sensors):
     """Convert the sensor reading into a discrete Q-table state.
 
@@ -80,25 +104,8 @@ def get_reward(sensors, state):
     Returns:
         A single float reward. Higher means better (e.g. reward staying centered
         on the line and penalise losing it).
-
     """
-    line_count = sum(state)
-    if line_count == 0:
-        return -5.0
-
-    reward = 0.0
-    for active, weight in zip(state, LINE_WEIGHTS):
-        if active:
-            reward += weight
-
-    if state[2]:
-        reward += 2.0
-    if state[0] or state[4]:
-        reward -= 1.0
-    if line_count > 2:
-        reward -= 0.5 * (line_count - 2)
-
-    return reward
+    return REWARD_BY_STATE[state]
 
 
 def choose_action(agent, state, training):
@@ -128,9 +135,14 @@ def choose_action(agent, state, training):
         return random.randrange(agent.n_actions)
 
     q_values = agent.q_table[state]
-    best_value = max(q_values)
-    best_actions = [i for i, value in enumerate(q_values) if value == best_value]
-    return random.choice(best_actions)
+    best_action = 0
+    best_value = q_values[0]
+    for action in range(1, agent.n_actions):
+        value = q_values[action]
+        if value > best_value:
+            best_action = action
+            best_value = value
+    return best_action
 
 
 # =============================================================================
