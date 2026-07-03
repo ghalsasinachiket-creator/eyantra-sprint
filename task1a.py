@@ -33,7 +33,7 @@ Ki = 0.0
 Kd = 0.45
 
 BASE_SPEED = 2.8
-MAX_SPEED = 6.0
+MAX_SPEED = 3.0
 INTEGRAL_LIMIT = 10.0
 LINE_PRESENT_THRESHOLD = 0.05
 CONTRAST_THRESHOLD = 0.08
@@ -92,7 +92,7 @@ def control_loop(sensors):
     derivative = error - prev_error
 
     # Slow down proportionally when the error is large, to avoid overshooting.
-    speed_scale = 1.0 - 0.4* min(abs(error), 1.0)
+    speed_scale = 1.0 - 0.4 * min(abs(error), 1.0)
     dynamic_base = BASE_SPEED * speed_scale
 
     correction = Kp*error + Ki*integral + Kd*derivative
