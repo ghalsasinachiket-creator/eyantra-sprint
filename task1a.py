@@ -30,10 +30,10 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 # PID tuning parameters. Start here, then tune in CoppeliaSim if needed.
 Kp = 1.5
 Ki = 0.0
-Kd = 0.6
+Kd = 0.45
 
-BASE_SPEED = 1.8
-MAX_SPEED = 3.0
+BASE_SPEED = 2.8
+MAX_SPEED = 6.0
 INTEGRAL_LIMIT = 10.0
 LINE_PRESENT_THRESHOLD = 0.05
 CONTRAST_THRESHOLD = 0.08
@@ -101,8 +101,12 @@ def control_loop(sensors):
 
     left = dynamic_base + correction
     right = dynamic_base - correction
-    left  = max(-MAX_SPEED, min(MAX_SPEED, left))
-    right = max(-MAX_SPEED, min(MAX_SPEED, right))
+    peak = max(abs(left), abs(right), MAX_SPEED)
+    scale = MAX_SPEED / peak
+    left *= scale
+    right *= scale
+#left  = max(-MAX_SPEED, min(MAX_SPEED, left))
+    #right = max(-MAX_SPEED, min(MAX_SPEED, right))
     return left, right
 
 
