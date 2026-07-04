@@ -130,9 +130,9 @@ def main():
             dt = now - last_t                      # NEW
             last_t = now                            # NEW
             dt_samples.append(dt)                   # NEW
-            if len(dt_samples) % 25 == 0:           # NEW — print every 25 samples, not every frame
-              avg = sum(dt_samples[-25:]) / 25    # NEW
-              print(f"avg dt over last 25 samples: {avg:.4f}s  (~{1/avg:.1f} Hz)")  # NEW
+            if len(dt_samples) % 1 == 0:           # NEW — print every 25 samples, not every frame
+             avg = sum(dt_samples[-25:]) / 25    # NEW
+             print(f"avg dt over last 25 samples: {avg:.4f}s  (~{1/avg:.1f} Hz)" , flush=True)  # NEW
 
             left, right = control_loop(sensors)
             client.send_motor_command(left, right)
