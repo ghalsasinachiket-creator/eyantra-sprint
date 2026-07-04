@@ -115,6 +115,9 @@ def main():
     client.connect()
     print("Connected to bridge_task1a. Running... (Ctrl+C to stop)")
 
+    last_t = time.time()          # NEW
+    dt_samples = []                # NEW
+
     try:
         while True:
             # Send one command for each fresh sensor packet.
@@ -122,6 +125,14 @@ def main():
             if sensors is None:
                 time.sleep(0.02)
                 continue
+
+            now = time.time()                      # NEW
+            dt = now - last_t                      # NEW
+            last_t = now                            # NEW
+            dt_samples.append(dt)                   # NEW
+            if len(dt_samples) % 25 == 0:           # NEW — print every 25 samples, not every frame
+              avg = sum(dt_samples[-25:]) / 25    # NEW
+              print(f"avg dt over last 25 samples: {avg:.4f}s  (~{1/avg:.1f} Hz)")  # NEW
 
             left, right = control_loop(sensors)
             client.send_motor_command(left, right)
