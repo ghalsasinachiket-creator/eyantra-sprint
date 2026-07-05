@@ -70,74 +70,69 @@ def get_line_strengths(sensors):
 
 
 def control_loop(sensors):
-    """PID line follower with adaptive speed; edits only inside this function."""
-    # persistent state inside function (so no global edits needed)
-    if not hasattr(control_loop, "prev_error"):
-        control_loop.prev_error = 0.0
-        control_loop.integral = 0.0
+    global prev_error, integral
 
-    # ---- Tunables (kept local to satisfy 'only control_loop' rule) ----
-    Kp = 1.35
-    Ki = 0.01
-    Kd = 0.40
+    # memory state inside function
+    if not hasattr(control_loop, "lost_count"):
+        control_loop.lost_count = 0
 
-    BASE_SPEED = 2.8     # higher cruise speed
-    MAX_SPEED = 3.0      # keep within task limits
-    INTEGRAL_LIMIT = 2.0
-    LINE_PRESENT_THRESHOLD = 0.05
-    CONTRAST_THRESHOLD = 0.08
+    # stable-at-corners tuning
+    Kp_l, Ki_l, Kd_l = 1.20, 0.0, 0.85
+    BASE, MAXV = 2.05, 3.0
+    I_LIM = 2.0
+    LINE_T = 0.035
+    CONTRAST_T = 0.05
 
-    SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
-    WEIGHTS = {
-        'left_corner': -2.0,
-        'left': -1.0,
-        'middle': 0.0,
-        'right': 1.0,
-        'right_corner': 2.0,
-    }
-
-    # ---- Contrast-normalized line extraction (works for dark/bright line) ----
+    # robust line strengths
     vals = [sensors[n] for n in SENSOR_ORDER]
-    low, high = min(vals), max(vals)
-    contrast = high - low
+    lo, hi = min(vals), max(vals)
+    c = hi - lo
 
-    if contrast < CONTRAST_THRESHOLD:
+    if c < CONTRAST_T:
         strengths = [0.0] * 5
     else:
-        bright = [(v - low) / contrast for v in vals]
-        dark = [(high - v) / contrast for v in vals]
+        bright = [(v - lo) / c for v in vals]
+        dark = [(hi - v) / c for v in vals]
         strengths = bright if sum(bright) <= sum(dark) else dark
 
     total = sum(strengths)
-    if total > LINE_PRESENT_THRESHOLD:
+    line_found = total > LINE_T
+
+    if line_found:
         error = sum(s * WEIGHTS[n] for s, n in zip(strengths, SENSOR_ORDER)) / total
+        control_loop.lost_count = 0
     else:
-        # keep steering in last known direction when line is weak/lost
-        error = control_loop.prev_error * 0.85
-        control_loop.integral = 0.0
+        control_loop.lost_count += 1
+        # controlled reacquire (not too violent)
+        sign = 1.0 if prev_error >= 0 else -1.0
+        if control_loop.lost_count <= 5:
+            error = prev_error * 0.90
+        else:
+            error = sign * 0.95
+        integral = 0.0
 
-    # ---- PID ----
-    control_loop.integral += error
-    control_loop.integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, control_loop.integral))
-    derivative = error - control_loop.prev_error
+    integral += error
+    integral = max(-I_LIM, min(I_LIM, integral))
+    derivative = error - prev_error
 
-    correction = Kp * error + Ki * control_loop.integral + Kd * derivative
+    correction = Kp_l * error + Ki_l * integral + Kd_l * derivative
 
-    # adaptive speed: fast on straights, slower in turns
-    turn = min(abs(error), 1.5) / 1.5
-    dynamic_base = BASE_SPEED * (1.0 - 0.35 * turn)
+    # stronger slowdown in high-error turns (prevents corner overshoot)
+    e = min(abs(error), 1.5) / 1.5
+    if line_found:
+        dynamic_base = BASE * (1.0 - 0.55 * e)
+    else:
+        dynamic_base = 1.65 if control_loop.lost_count < 10 else 1.45
 
-    # keep correction bounded so one wheel doesn't saturate too early
     correction = max(-dynamic_base, min(dynamic_base, correction))
 
     left = dynamic_base + correction
     right = dynamic_base - correction
 
-    # clamp output
-    left = max(-MAX_SPEED, min(MAX_SPEED, left))
-    right = max(-MAX_SPEED, min(MAX_SPEED, right))
+    left = max(-MAXV, min(MAXV, left))
+    right = max(-MAXV, min(MAXV, right))
 
-    control_loop.prev_error = error
+    prev_error = error
     return left, right
 
 
