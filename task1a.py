@@ -76,14 +76,13 @@ def control_loop(sensors):
     if not hasattr(control_loop, "lost_count"):
         control_loop.lost_count = 0
 
-    # stable-at-corners tuning
-    Kp_l, Ki_l, Kd_l = 1.20, 0.0, 0.85
-    BASE, MAXV = 2.05, 3.0
+    # Aggressive-but-manageable tuning
+    Kp_l, Ki_l, Kd_l = 1.35, 0.0, 0.70
+    BASE, MAXV = 2.45, 3.0
     I_LIM = 2.0
-    LINE_T = 0.035
-    CONTRAST_T = 0.05
+    LINE_T = 0.03
+    CONTRAST_T = 0.045
 
-    # robust line strengths
     vals = [sensors[n] for n in SENSOR_ORDER]
     lo, hi = min(vals), max(vals)
     c = hi - lo
@@ -103,12 +102,11 @@ def control_loop(sensors):
         control_loop.lost_count = 0
     else:
         control_loop.lost_count += 1
-        # controlled reacquire (not too violent)
         sign = 1.0 if prev_error >= 0 else -1.0
-        if control_loop.lost_count <= 5:
-            error = prev_error * 0.90
+        if control_loop.lost_count <= 4:
+            error = prev_error * 0.93
         else:
-            error = sign * 0.95
+            error = sign * 1.05
         integral = 0.0
 
     integral += error
@@ -117,12 +115,12 @@ def control_loop(sensors):
 
     correction = Kp_l * error + Ki_l * integral + Kd_l * derivative
 
-    # stronger slowdown in high-error turns (prevents corner overshoot)
+    # less slowdown than safe version -> faster lap
     e = min(abs(error), 1.5) / 1.5
     if line_found:
-        dynamic_base = BASE * (1.0 - 0.55 * e)
+        dynamic_base = BASE * (1.0 - 0.42 * e)
     else:
-        dynamic_base = 1.65 if control_loop.lost_count < 10 else 1.45
+        dynamic_base = 1.90 if control_loop.lost_count < 8 else 1.65
 
     correction = max(-dynamic_base, min(dynamic_base, correction))
 
