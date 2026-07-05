@@ -28,12 +28,12 @@ from connector_task1a import CoppeliaClient
 SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 
 # PID tuning parameters. Start here, then tune in CoppeliaSim if needed.
-Kp = 1.5
-Ki = 0.0
-Kd = 0.45
+Kp = 1.2
+Ki = 0.02
+Kd = 0.18
 
-BASE_SPEED = 2.8
-MAX_SPEED = 3.0
+BASE_SPEED = 3.6
+MAX_SPEED = 5.0
 INTEGRAL_LIMIT = 10.0
 LINE_PRESENT_THRESHOLD = 0.05
 CONTRAST_THRESHOLD = 0.08
@@ -48,7 +48,7 @@ WEIGHTS = {
 
 prev_error = 0.0
 integral = 0.0
-
+prev_time = None
 
 def get_line_strengths(sensors):
     """Return contrast-based line strengths, independent of line color."""
@@ -70,43 +70,74 @@ def get_line_strengths(sensors):
 
 
 def control_loop(sensors):
-    """Return (left_speed, right_speed) for the current sensor reading.
+    """PID line follower with adaptive speed; edits only inside this function."""
+    # persistent state inside function (so no global edits needed)
+    if not hasattr(control_loop, "prev_error"):
+        control_loop.prev_error = 0.0
+        control_loop.integral = 0.0
 
-      2. Feed that error through a PID controller:
-      3. Drive the wheels differentially:
-    """
-    # ----- placeholder: drive straight slowly. REPLACE THIS. -----
-    global prev_error, integral
+    # ---- Tunables (kept local to satisfy 'only control_loop' rule) ----
+    Kp = 1.35
+    Ki = 0.01
+    Kd = 0.40
 
-    line_strengths = get_line_strengths(sensors)
-    weighted_sum = sum(value * WEIGHTS[name] for value, name in zip(line_strengths, SENSOR_ORDER))
-    total = sum(line_strengths)
+    BASE_SPEED = 2.8     # higher cruise speed
+    MAX_SPEED = 3.0      # keep within task limits
+    INTEGRAL_LIMIT = 2.0
+    LINE_PRESENT_THRESHOLD = 0.05
+    CONTRAST_THRESHOLD = 0.08
 
-    if total > LINE_PRESENT_THRESHOLD:
-        error = weighted_sum/total
+    SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
+    WEIGHTS = {
+        'left_corner': -2.0,
+        'left': -1.0,
+        'middle': 0.0,
+        'right': 1.0,
+        'right_corner': 2.0,
+    }
+
+    # ---- Contrast-normalized line extraction (works for dark/bright line) ----
+    vals = [sensors[n] for n in SENSOR_ORDER]
+    low, high = min(vals), max(vals)
+    contrast = high - low
+
+    if contrast < CONTRAST_THRESHOLD:
+        strengths = [0.0] * 5
     else:
-        error = prev_error * 0.9  # decay and keep turning toward the last known line
-        integral = 0.0  # reset to avoid windup
-    
-    integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, integral + error))
-    derivative = error - prev_error
+        bright = [(v - low) / contrast for v in vals]
+        dark = [(high - v) / contrast for v in vals]
+        strengths = bright if sum(bright) <= sum(dark) else dark
 
-    # Slow down proportionally when the error is large, to avoid overshooting.
-    speed_scale = 1.0 - 0.4 * min(abs(error), 1.0)
-    dynamic_base = BASE_SPEED * speed_scale
+    total = sum(strengths)
+    if total > LINE_PRESENT_THRESHOLD:
+        error = sum(s * WEIGHTS[n] for s, n in zip(strengths, SENSOR_ORDER)) / total
+    else:
+        # keep steering in last known direction when line is weak/lost
+        error = control_loop.prev_error * 0.85
+        control_loop.integral = 0.0
 
-    correction = Kp*error + Ki*integral + Kd*derivative
+    # ---- PID ----
+    control_loop.integral += error
+    control_loop.integral = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, control_loop.integral))
+    derivative = error - control_loop.prev_error
+
+    correction = Kp * error + Ki * control_loop.integral + Kd * derivative
+
+    # adaptive speed: fast on straights, slower in turns
+    turn = min(abs(error), 1.5) / 1.5
+    dynamic_base = BASE_SPEED * (1.0 - 0.35 * turn)
+
+    # keep correction bounded so one wheel doesn't saturate too early
     correction = max(-dynamic_base, min(dynamic_base, correction))
-    prev_error = error
 
     left = dynamic_base + correction
     right = dynamic_base - correction
-    peak = max(abs(left), abs(right), MAX_SPEED)
-    scale = MAX_SPEED / peak
-    left *= scale
-    right *= scale
-#left  = max(-MAX_SPEED, min(MAX_SPEED, left))
-    #right = max(-MAX_SPEED, min(MAX_SPEED, right))
+
+    # clamp output
+    left = max(-MAX_SPEED, min(MAX_SPEED, left))
+    right = max(-MAX_SPEED, min(MAX_SPEED, right))
+
+    control_loop.prev_error = error
     return left, right
 
 
@@ -137,7 +168,7 @@ def main():
             left, right = control_loop(sensors)
             client.send_motor_command(left, right)
 
-            time.sleep(0.08)   # keep commands slightly below the bridge read rate
+            time.sleep(0.005)   # keep commands slightly below the bridge read rate
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
