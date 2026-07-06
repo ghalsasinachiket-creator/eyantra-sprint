@@ -58,27 +58,49 @@ Q_TABLE_PATH = os.path.join(
 # =============================================================================
  
 def get_state(sensors):
-    values = [
-        sensors['left_corner'],
-        sensors['left'],
-        sensors['middle'],
-        sensors['right'],
-        sensors['right_corner']
+    values = [sensors[name] for name in SENSOR_ORDER]
+    low = min(values)
+    high = max(values)
+    contrast = high - low
+
+    if contrast < DEVIATION_THRESH:
+        return (0, 0)
+
+    midpoint = (low + high) / 2.0
+    bright_active = [value >= midpoint for value in values]
+    dark_active = [value <= midpoint for value in values]
+    position_weights = [0.55, 1.0, 1.35, 1.0, 0.55]
+
+    def score_candidate(active):
+        count = sum(active)
+        if count == 0:
+            return -1.0
+        weighted_position = sum(
+            weight for is_active, weight in zip(active, position_weights)
+            if is_active
+        ) / count
+        wide_penalty = 0.18 * max(0, count - 3)
+        return weighted_position - wide_penalty
+
+    active = (
+        bright_active
+        if score_candidate(bright_active) >= score_candidate(dark_active)
+        else dark_active
+    )
+
+    strengths = [
+        (value - low) / contrast if is_active else 0.0
+        for value, is_active in zip(values, active)
     ]
- 
-    mean_val = sum(values) / len(values)
- 
-    lc = abs(values[0] - mean_val) > DEVIATION_THRESH
-    l  = abs(values[1] - mean_val) > DEVIATION_THRESH
-    m  = abs(values[2] - mean_val) > DEVIATION_THRESH
-    r  = abs(values[3] - mean_val) > DEVIATION_THRESH
-    rc = abs(values[4] - mean_val) > DEVIATION_THRESH
- 
-    if not (lc or l or m or r or rc):
-        return (0, 0)   # no sensor stands out -- line fully lost
- 
-    mask = (int(lc) << 4) | (int(l) << 3) | (int(m) << 2) | (int(r) << 1) | int(rc)
- 
+    peak = max(strengths)
+
+    if peak < 0.45:
+        return (0, 0)
+
+    mask = 0
+    for active_sensor in active:
+        mask = (mask << 1) | int(active_sensor)
+
     return (mask, 1)
  
  
@@ -86,21 +108,29 @@ def get_reward(sensors, state):
     mask, detected = state
  
     if not detected:
-        return -100
+        return -100.0
  
     lc = (mask >> 4) & 1
     l  = (mask >> 3) & 1
     m  = (mask >> 2) & 1
     r  = (mask >> 1) & 1
     rc = mask & 1
- 
+
     if m and not (l or r or lc or rc):
-        return 50     # perfectly centered on the line
-    if (l or r) and not (lc or rc):
-        return 10      # mild drift, still recoverable with a soft turn
-    if lc or rc:
-        return -10      # corner sensor engaged -- expected near sharp bends
-    return -50        # messy / ambiguous reading
+        return 60.0
+    if m and (l or r) and not (lc or rc):
+        return 35.0
+    if l and not (r or lc or rc):
+        return 15.0
+    if r and not (l or lc or rc):
+        return 15.0
+    if lc and not rc:
+        return -20.0
+    if rc and not lc:
+        return -20.0
+    if l and r and not m:
+        return -35.0
+    return -50.0
  
  
 def heuristic_action(mask):
@@ -139,14 +169,38 @@ def choose_action(agent, state, training):
 
     agent._ensure(state)
 
-    if training and random.random() < agent.epsilon:
-        action = random.randrange(agent.n_actions)
+    safe_action = heuristic_action(mask)
+    lc = (mask >> 4) & 1
+    l  = (mask >> 3) & 1
+    m  = (mask >> 2) & 1
+    r  = (mask >> 1) & 1
+    rc = mask & 1
+
+    if lc or rc:
+        action = safe_action
+    elif training and random.random() < agent.epsilon:
+        if m:
+            action = random.choice([0, 1, 2])
+        elif l and not r:
+            action = random.choice([1, 3])
+        elif r and not l:
+            action = random.choice([2, 4])
+        else:
+            action = safe_action
     else:
         q_values = agent.q_table[state]
-        action = q_values.index(max(q_values))
+        best_q = max(q_values)
+        safe_q = q_values[safe_action]
+        action = q_values.index(best_q)
+        if best_q == min(q_values) or best_q < safe_q + 5.0:
+            action = safe_action
 
     if action in (3, 4):
         choose_action.last_turn = action
+    elif l and not r:
+        choose_action.last_turn = 1
+    elif r and not l:
+        choose_action.last_turn = 2
 
     return action
  
