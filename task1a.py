@@ -75,15 +75,15 @@ def control_loop(sensors):
     if not hasattr(control_loop, "lost_count"):
         control_loop.lost_count = 0
 
-        control_loop.filtered_error = 0.0
+    control_loop.filtered_error = 0.0
 
-    # Tuned for speed with gap robustness
-    Kp_l, Ki_l, Kd_l = 1.28, 0.0, 0.68
-    BASE, MAXV = 2.35, 3.0
-    I_LIM = 2.0
+    # Ultra-aggressive tuning
+    Kp_l, Ki_l, Kd_l = 1.38, 0.0, 0.62
+    BASE, MAXV = 2.55, 3.0
+    I_LIM = 1.8
 
-    LINE_T = 0.032
-    CONTRAST_T = 0.045
+    LINE_T = 0.028
+    CONTRAST_T = 0.040
 
     vals = [sensors[n] for n in SENSOR_ORDER]
     lo, hi = min(vals), max(vals)
@@ -101,19 +101,19 @@ def control_loop(sensors):
 
     if line_found:
         raw_error = sum(s * WEIGHTS[n] for s, n in zip(strengths, SENSOR_ORDER)) / total
-        # low-pass to avoid jitter from broken paint/markers
-        control_loop.filtered_error = 0.65 * control_loop.filtered_error + 0.35 * raw_error
+        # lighter filtering => faster response
+        control_loop.filtered_error = 0.50 * control_loop.filtered_error + 0.50 * raw_error
         error = control_loop.filtered_error
         control_loop.lost_count = 0
     else:
         control_loop.lost_count += 1
         sign = 1.0 if prev_error >= 0 else -1.0
-        if control_loop.lost_count <= 4:
-            error = prev_error * 0.94
-        elif control_loop.lost_count <= 12:
-            error = sign * 0.95
+        if control_loop.lost_count <= 3:
+            error = prev_error * 0.96
+        elif control_loop.lost_count <= 10:
+            error = sign * 1.00
         else:
-            error = sign * 1.15  # stronger search if line missing too long
+            error = sign * 1.25
         integral = 0.0
 
     integral += error
@@ -121,15 +121,12 @@ def control_loop(sensors):
     derivative = error - prev_error
     correction = Kp_l * error + Ki_l * integral + Kd_l * derivative
 
-    # 3-speed policy
+    # less slowdown in turns => faster lap
     if line_found:
         e = min(abs(error), 1.5) / 1.5
-        dynamic_base = BASE * (1.0 - 0.38 * e)   # faster on average
+        dynamic_base = BASE * (1.0 - 0.30 * e)
     else:
-        if control_loop.lost_count <= 5:
-            dynamic_base = 1.95   # coast through short gaps
-        else:
-            dynamic_base = 1.65   # controlled search in long loss
+        dynamic_base = 2.05 if control_loop.lost_count <= 5 else 1.75
 
     correction = max(-dynamic_base, min(dynamic_base, correction))
 
