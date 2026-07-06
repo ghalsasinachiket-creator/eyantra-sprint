@@ -78,7 +78,7 @@ def control_loop(sensors):
 
     # stable-at-corners tuning
     Kp_l, Ki_l, Kd_l = 1.25, 0.0, 0.72
-    BASE, MAXV = 2.25, 3.0
+    BASE, MAXV = 2.35, 3.0
     I_LIM = 2.0
     LINE_T = 0.035
     CONTRAST_T = 0.05
