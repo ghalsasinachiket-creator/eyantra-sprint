@@ -74,27 +74,29 @@ def control_loop(sensors):
 
     if not hasattr(control_loop, "lost_count"):
         control_loop.lost_count = 0
-        control_loop.filtered_error = 0.0
         control_loop.straight_count = 0
+        control_loop.f_error = 0.0
+        control_loop.last_sign = 1.0
 
-    # ---- Tuned for burst-on-straights ----
-    Kp_l, Ki_l, Kd_l = 1.30, 0.0, 0.65
-    BASE = 2.35
-    BOOST_BASE = 2.90      # burst speed on long straights
+    # --- Tuned for rough/dashed segments + speed ---
+    Kp_l, Ki_l, Kd_l = 1.22, 0.0, 0.62
+    BASE = 2.45
+    BOOST = 2.95
     MAXV = 3.0
-    I_LIM = 2.0
-    LINE_T = 0.030
-    CONTRAST_T = 0.045
+    I_LIM = 1.8
+
+    LINE_T = 0.028
+    CONTRAST_T = 0.042
 
     vals = [sensors[n] for n in SENSOR_ORDER]
     lo, hi = min(vals), max(vals)
-    c = hi - lo
+    contrast = hi - lo
 
-    if c < CONTRAST_T:
+    if contrast < CONTRAST_T:
         strengths = [0.0] * 5
     else:
-        bright = [(v - lo) / c for v in vals]
-        dark = [(hi - v) / c for v in vals]
+        bright = [(v - lo) / contrast for v in vals]
+        dark = [(hi - v) / contrast for v in vals]
         strengths = bright if sum(bright) <= sum(dark) else dark
 
     total = sum(strengths)
@@ -102,18 +104,29 @@ def control_loop(sensors):
 
     if line_found:
         raw_error = sum(s * WEIGHTS[n] for s, n in zip(strengths, SENSOR_ORDER)) / total
-        control_loop.filtered_error = 0.6 * control_loop.filtered_error + 0.4 * raw_error
-        error = control_loop.filtered_error
+
+        # confidence from how concentrated the line is on a few sensors
+        peak = max(strengths)
+        confidence = max(0.0, min(1.0, (peak - 0.35) / 0.65))  # 0..1
+
+        # heavier smoothing in low confidence zones (dashed / disturbed)
+        alpha = 0.55 if confidence > 0.6 else 0.35
+        control_loop.f_error = (1 - alpha) * control_loop.f_error + alpha * raw_error
+        error = control_loop.f_error
+
         control_loop.lost_count = 0
+        control_loop.last_sign = 1.0 if error >= 0 else -1.0
     else:
         control_loop.lost_count += 1
-        sign = 1.0 if prev_error >= 0 else -1.0
-        if control_loop.lost_count <= 4:
-            error = prev_error * 0.94
+        # bridge short gaps with heading memory, avoid violent search
+        if control_loop.lost_count <= 5:
+            error = prev_error * 0.96
+        elif control_loop.lost_count <= 14:
+            error = control_loop.last_sign * 0.85
         else:
-            error = sign * 1.05
+            error = control_loop.last_sign * 1.05
         integral = 0.0
-        control_loop.straight_count = 0
+        confidence = 0.0
 
     # PID
     integral += error
@@ -121,26 +134,29 @@ def control_loop(sensors):
     derivative = error - prev_error
     correction = Kp_l * error + Ki_l * integral + Kd_l * derivative
 
-    # ---- Straight detection + burst logic ----
-    # straight if both error and derivative are small consistently
-    if line_found and abs(error) < 0.10 and abs(derivative) < 0.06:
+    # Straight detector for burst speed
+    if line_found and abs(error) < 0.09 and abs(derivative) < 0.05 and confidence > 0.75:
         control_loop.straight_count += 1
     else:
         control_loop.straight_count = 0
 
-    # enter boost only after stable straight for a while
-    in_boost = control_loop.straight_count > 12
+    in_boost = control_loop.straight_count >= 10
 
+    # Speed policy:
+    # - high on stable straights
+    # - moderate on normal line
+    # - keep momentum on dashed/rough zones (don't crawl)
     if line_found:
+        e = min(abs(error), 1.5) / 1.5
         if in_boost:
-            # high speed but still slight turn-based modulation
-            e = min(abs(error), 1.0) / 1.0
-            dynamic_base = BOOST_BASE * (1.0 - 0.20 * e)
+            dynamic_base = BOOST * (1.0 - 0.18 * e)
         else:
-            e = min(abs(error), 1.5) / 1.5
-            dynamic_base = BASE * (1.0 - 0.42 * e)
+            dynamic_base = BASE * (1.0 - 0.34 * e)
+        # if confidence is low, slightly cap speed but don't over-slow
+        if confidence < 0.45:
+            dynamic_base = min(dynamic_base, 2.10)
     else:
-        dynamic_base = 1.90 if control_loop.lost_count <= 8 else 1.65
+        dynamic_base = 1.95 if control_loop.lost_count <= 10 else 1.70
 
     correction = max(-dynamic_base, min(dynamic_base, correction))
 
