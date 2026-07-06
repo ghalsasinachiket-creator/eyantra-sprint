@@ -74,16 +74,17 @@ def control_loop(sensors):
 
     if not hasattr(control_loop, "lost_count"):
         control_loop.lost_count = 0
+        control_loop.filtered_error = 0.0
+        control_loop.straight_count = 0
 
-    control_loop.filtered_error = 0.0
-
-    # Ultra-aggressive tuning
-    Kp_l, Ki_l, Kd_l = 1.38, 0.0, 0.62
-    BASE, MAXV = 2.55, 3.0
-    I_LIM = 1.8
-
-    LINE_T = 0.028
-    CONTRAST_T = 0.040
+    # ---- Tuned for burst-on-straights ----
+    Kp_l, Ki_l, Kd_l = 1.30, 0.0, 0.65
+    BASE = 2.35
+    BOOST_BASE = 2.90      # burst speed on long straights
+    MAXV = 3.0
+    I_LIM = 2.0
+    LINE_T = 0.030
+    CONTRAST_T = 0.045
 
     vals = [sensors[n] for n in SENSOR_ORDER]
     lo, hi = min(vals), max(vals)
@@ -101,32 +102,45 @@ def control_loop(sensors):
 
     if line_found:
         raw_error = sum(s * WEIGHTS[n] for s, n in zip(strengths, SENSOR_ORDER)) / total
-        # lighter filtering => faster response
-        control_loop.filtered_error = 0.50 * control_loop.filtered_error + 0.50 * raw_error
+        control_loop.filtered_error = 0.6 * control_loop.filtered_error + 0.4 * raw_error
         error = control_loop.filtered_error
         control_loop.lost_count = 0
     else:
         control_loop.lost_count += 1
         sign = 1.0 if prev_error >= 0 else -1.0
-        if control_loop.lost_count <= 3:
-            error = prev_error * 0.96
-        elif control_loop.lost_count <= 10:
-            error = sign * 1.00
+        if control_loop.lost_count <= 4:
+            error = prev_error * 0.94
         else:
-            error = sign * 1.25
+            error = sign * 1.05
         integral = 0.0
+        control_loop.straight_count = 0
 
+    # PID
     integral += error
     integral = max(-I_LIM, min(I_LIM, integral))
     derivative = error - prev_error
     correction = Kp_l * error + Ki_l * integral + Kd_l * derivative
 
-    # less slowdown in turns => faster lap
-    if line_found:
-        e = min(abs(error), 1.5) / 1.5
-        dynamic_base = BASE * (1.0 - 0.30 * e)
+    # ---- Straight detection + burst logic ----
+    # straight if both error and derivative are small consistently
+    if line_found and abs(error) < 0.10 and abs(derivative) < 0.06:
+        control_loop.straight_count += 1
     else:
-        dynamic_base = 2.05 if control_loop.lost_count <= 5 else 1.75
+        control_loop.straight_count = 0
+
+    # enter boost only after stable straight for a while
+    in_boost = control_loop.straight_count > 12
+
+    if line_found:
+        if in_boost:
+            # high speed but still slight turn-based modulation
+            e = min(abs(error), 1.0) / 1.0
+            dynamic_base = BOOST_BASE * (1.0 - 0.20 * e)
+        else:
+            e = min(abs(error), 1.5) / 1.5
+            dynamic_base = BASE * (1.0 - 0.42 * e)
+    else:
+        dynamic_base = 1.90 if control_loop.lost_count <= 8 else 1.65
 
     correction = max(-dynamic_base, min(dynamic_base, correction))
 
