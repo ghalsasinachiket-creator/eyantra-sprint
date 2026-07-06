@@ -66,12 +66,18 @@ def get_state(sensors):
     if contrast < DEVIATION_THRESH:
         return (0, 0)
 
-    midpoint = (low + high) / 2.0
-    bright_active = [value >= midpoint for value in values]
-    dark_active = [value <= midpoint for value in values]
-    position_weights = [0.55, 1.0, 1.35, 1.0, 0.55]
+    bright_strengths = [(value - low) / contrast for value in values]
+    dark_strengths = [(high - value) / contrast for value in values]
+    position_weights = [0.55, 1.05, 1.35, 1.05, 0.55]
 
-    def score_candidate(active):
+    def build_candidate(strengths):
+        peak = max(strengths)
+        if peak < 0.45:
+            return [False] * len(strengths), peak
+        active = [strength >= max(0.42, peak * 0.58) for strength in strengths]
+        return active, peak
+
+    def score_candidate(active, peak):
         count = sum(active)
         if count == 0:
             return -1.0
@@ -79,20 +85,19 @@ def get_state(sensors):
             weight for is_active, weight in zip(active, position_weights)
             if is_active
         ) / count
-        wide_penalty = 0.18 * max(0, count - 3)
-        return weighted_position - wide_penalty
+        wide_penalty = 0.28 * max(0, count - 2)
+        edge_penalty = 0.22 * int(active[0] or active[4])
+        return peak + weighted_position - wide_penalty - edge_penalty
 
-    active = (
-        bright_active
-        if score_candidate(bright_active) >= score_candidate(dark_active)
-        else dark_active
-    )
+    bright_active, bright_peak = build_candidate(bright_strengths)
+    dark_active, dark_peak = build_candidate(dark_strengths)
 
-    strengths = [
-        (value - low) / contrast if is_active else 0.0
-        for value, is_active in zip(values, active)
-    ]
-    peak = max(strengths)
+    if score_candidate(bright_active, bright_peak) >= score_candidate(dark_active, dark_peak):
+        active = bright_active
+        peak = bright_peak
+    else:
+        active = dark_active
+        peak = dark_peak
 
     if peak < 0.45:
         return (0, 0)
@@ -178,9 +183,11 @@ def choose_action(agent, state, training):
 
     if lc or rc:
         action = safe_action
-    elif training and random.random() < agent.epsilon:
+    elif (l and not r) or (r and not l):
+        action = safe_action
+    elif training and random.random() < min(agent.epsilon, 0.08):
         if m:
-            action = random.choice([0, 1, 2])
+            action = random.choice([0, 0, 1, 2])
         elif l and not r:
             action = random.choice([1, 3])
         elif r and not l:
