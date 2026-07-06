@@ -72,18 +72,19 @@ def get_line_strengths(sensors):
 def control_loop(sensors):
     global prev_error, integral
 
-    # memory state inside function
     if not hasattr(control_loop, "lost_count"):
         control_loop.lost_count = 0
 
-    # stable-at-corners tuning
-    Kp_l, Ki_l, Kd_l = 1.25, 0.0, 0.72
+        control_loop.filtered_error = 0.0
+
+    # Tuned for speed with gap robustness
+    Kp_l, Ki_l, Kd_l = 1.28, 0.0, 0.68
     BASE, MAXV = 2.35, 3.0
     I_LIM = 2.0
-    LINE_T = 0.035
-    CONTRAST_T = 0.05
 
-    # robust line strengths
+    LINE_T = 0.032
+    CONTRAST_T = 0.045
+
     vals = [sensors[n] for n in SENSOR_ORDER]
     lo, hi = min(vals), max(vals)
     c = hi - lo
@@ -99,30 +100,36 @@ def control_loop(sensors):
     line_found = total > LINE_T
 
     if line_found:
-        error = sum(s * WEIGHTS[n] for s, n in zip(strengths, SENSOR_ORDER)) / total
+        raw_error = sum(s * WEIGHTS[n] for s, n in zip(strengths, SENSOR_ORDER)) / total
+        # low-pass to avoid jitter from broken paint/markers
+        control_loop.filtered_error = 0.65 * control_loop.filtered_error + 0.35 * raw_error
+        error = control_loop.filtered_error
         control_loop.lost_count = 0
     else:
         control_loop.lost_count += 1
-        # controlled reacquire (not too violent)
         sign = 1.0 if prev_error >= 0 else -1.0
-        if control_loop.lost_count <= 5:
-            error = prev_error * 0.90
-        else:
+        if control_loop.lost_count <= 4:
+            error = prev_error * 0.94
+        elif control_loop.lost_count <= 12:
             error = sign * 0.95
+        else:
+            error = sign * 1.15  # stronger search if line missing too long
         integral = 0.0
 
     integral += error
     integral = max(-I_LIM, min(I_LIM, integral))
     derivative = error - prev_error
-
     correction = Kp_l * error + Ki_l * integral + Kd_l * derivative
 
-    # stronger slowdown in high-error turns (prevents corner overshoot)
-    e = min(abs(error), 1.5) / 1.5
+    # 3-speed policy
     if line_found:
-        dynamic_base = BASE * (1.0 - 0.42 * e)
+        e = min(abs(error), 1.5) / 1.5
+        dynamic_base = BASE * (1.0 - 0.38 * e)   # faster on average
     else:
-        dynamic_base = 1.65 if control_loop.lost_count < 10 else 1.45
+        if control_loop.lost_count <= 5:
+            dynamic_base = 1.95   # coast through short gaps
+        else:
+            dynamic_base = 1.65   # controlled search in long loss
 
     correction = max(-dynamic_base, min(dynamic_base, correction))
 
