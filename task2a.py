@@ -57,8 +57,8 @@ KI = 0.02
 KD = 1.8
 MAX_CORRECTION = 3.5        # clamp so wheel speeds don't go haywire
 
-PICK_PROXIMITY_THRESHOLD = 0.10   # metres — close enough to pick
-DROP_PROXIMITY_THRESHOLD = 0.10   # metres — close enough to drop
+PICK_PROXIMITY_THRESHOLD = 0.14   # metres — close enough to pick
+DROP_PROXIMITY_THRESHOLD = 0.14   # metres — close enough to drop
 COLOR_CONFIDENCE_THRESHOLD = 0.25
 
 # Sensor position weights, left → right (symmetric around 0).
