@@ -39,7 +39,7 @@ Team ID: [ 403 ]
 
 import time
 
-from task2_.task2a.connector import CoppeliaClient
+from connector import CoppeliaClient
 
 # The five line sensors, ordered left → right across the robot ([0.0, 1.0]).
 SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
