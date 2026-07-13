@@ -141,9 +141,9 @@ def control_loop(sensors):
 
     if at_junction and _carrying_box_state:
         if _detected_color_state == "red":
-            error -= 1.7   # left
+            error -= 2.0  # left
         elif _detected_color_state == "green":
-            error += 1.9   # right
+            error += 2.0  # right
         # blue/unknown => straight
 
     _integral_error += error * DT
@@ -186,42 +186,16 @@ def detect_color(sensors):
 
 
 def should_pick(sensors, carrying_box):
-    """
-    Pickup FSM:
-      search  -> when near box, go settle
-      settle  -> keep robot stopped for SETTLE_FRAMES
-      pick_try-> return True repeatedly for PICK_TRY_FRAMES
-    """
-    global _carrying_box_state, _pick_state, _pick_timer
+    global _carrying_box_state
     _carrying_box_state = carrying_box
 
     if carrying_box:
-        _pick_state = "search"
-        _pick_timer = 0
         return False
 
-    near = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD)
+    p = sensors.get('proximity', 1.0)
+    return 0.0 < p < 0.135
 
-    if _pick_state == "search":
-        if near:
-            _pick_state = "settle"
-            _pick_timer = SETTLE_FRAMES
-        return False
 
-    if _pick_state == "settle":
-        _pick_timer -= 1
-        if _pick_timer <= 0:
-            _pick_state = "pick_try"
-            _pick_timer = PICK_TRY_FRAMES
-        return False
-
-    if _pick_state == "pick_try":
-        _pick_timer -= 1
-        if _pick_timer <= 0:
-            _pick_state = "search"  # failed this cycle; re-approach
-        return True
-
-    return False
 
 
 def should_drop(sensors, carrying_box, detected_color):
@@ -263,10 +237,12 @@ def main():
 
             # --- Pick ---
             if not carrying_box and should_pick(last_sensors, carrying_box):
-                success = client.send_pick()
-                print(f"PICK attempted  — success={success}")
-                if success:
-                    carrying_box = True
+              client.send_motor_command(0.0, 0.0)
+              time.sleep(0.25)  # short settle
+              success = client.send_pick()
+              print(f"PICK attempted  — success={success}")
+            if success:
+              carrying_box = True
 
             # --- Drop ---
             if carrying_box and should_drop(last_sensors, carrying_box, detected_color):
