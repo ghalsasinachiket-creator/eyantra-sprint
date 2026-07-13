@@ -50,55 +50,82 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 #  You may add helper functions anywhere in this section.
 # =============================================================================
 
+# =============================================================================
+#  TODO (participants): implement the four functions below.
+#  You may add helper functions anywhere in this section.
+# =============================================================================
+
+# =============================================================================
+#  TODO (participants): implement the four functions below.
+#  You may add helper functions anywhere in this section.
+# =============================================================================
+
+# =============================================================================
+#  TODO (participants): implement the four functions below.
+#  You may add helper functions anywhere in this section.
+# =============================================================================
 
 # ---- Tunable constants -----------------------------------------------------
-BASE_SPEED = 3.0            # rad/s, forward speed on straight line
+BASE_SPEED = 3.0
 KP = 6.0
 KI = 0.02
 KD = 1.8
-MAX_CORRECTION = 3.5        # clamp so wheel speeds don't go haywire
+MAX_CORRECTION = 3.5
 
-PICK_PROXIMITY_THRESHOLD = 0.16   # metres — close enough to pick
-DROP_PROXIMITY_THRESHOLD = 0.16   # metres — close enough to drop
-COLOR_CONFIDENCE_THRESHOLD = 0.12
+PICK_PROXIMITY_THRESHOLD = 0.20
+DROP_PROXIMITY_THRESHOLD = 0.18
+COLOR_CONFIDENCE_THRESHOLD = 0.08
 
-# Sensor position weights, left → right (symmetric around 0).
+# stop-at-box behavior
+SETTLE_FRAMES = 40      # 40 * 0.05 = 2.0 s
+PICK_TRY_FRAMES = 20    # 1.0 s of repeated pick attempts
+
 SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
 
-# ---- Internal PID / navigation state ---------------------------------------
+# ---- Internal state --------------------------------------------------------
 _integral_error = 0.0
 _prev_error = 0.0
 _last_line_seen_sign = 1.0
 
 _carrying_box_state = False
 _detected_color_state = None
-_color_hist = []   # rolling RGB smoothing history
+_color_hist = []
 
-DT = 0.05  # matches the ~20 Hz loop in main()
+# pickup state machine: search -> settle -> pick_try
+_pick_state = "search"
+_pick_timer = 0
+
+DT = 0.05
 
 
 def _line_error(sensors):
-    """Weighted-average line position error from the 5 line sensors."""
     total_weight = 0.0
     total_signal = 0.0
     for w, key in zip(SENSOR_WEIGHTS, SENSOR_ORDER):
         v = sensors.get(key, 0.0)
         total_weight += w * v
         total_signal += v
-
     if total_signal < 1e-3:
         return None
     return total_weight / total_signal
 
 
+def _is_object_close(sensors, threshold):
+    # Protocol: proximity is distance in metres; 1.0 means no object
+    p = sensors.get('proximity', 1.0)
+    return 0.0 < p < threshold
+
+
 def control_loop(sensors):
-    """Return (left_speed, right_speed) for the current sensor reading."""
-    global _integral_error, _prev_error, _last_line_seen_sign
+    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state
+
+    # Hard stop while stabilizing and picking near box
+    if _pick_state in ("settle", "pick_try") and not _carrying_box_state:
+        return 0.0, 0.0
 
     error = _line_error(sensors)
 
     if error is None:
-        # Line lost: rotate toward last seen side.
         search_speed = 1.2
         left = -search_speed * _last_line_seen_sign
         right =  search_speed * _last_line_seen_sign
@@ -107,21 +134,18 @@ def control_loop(sensors):
     if abs(error) > 1e-6:
         _last_line_seen_sign = 1.0 if error > 0 else -1.0
 
-    # Junction detection (slightly permissive to avoid missing fork)
     at_junction = (
         sensors.get('left_corner', 0.0) > 0.35 and
         sensors.get('right_corner', 0.0) > 0.35
     )
 
-    # Color-based routing while carrying
     if at_junction and _carrying_box_state:
         if _detected_color_state == "red":
-            error -= 1.6
+            error -= 1.7   # left
         elif _detected_color_state == "green":
-            error += 1.8
+            error += 1.9   # right
         # blue/unknown => straight
 
-    # PID
     _integral_error += error * DT
     derivative = (error - _prev_error) / DT
     _prev_error = error
@@ -129,15 +153,12 @@ def control_loop(sensors):
     correction = KP * error + KI * _integral_error + KD * derivative
     correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, correction))
 
-    # Positive error => line is right => turn right (left faster, right slower)
     left = BASE_SPEED + correction
     right = BASE_SPEED - correction
-
     return left, right
 
 
 def detect_color(sensors):
-    """Identify the box color from RGB sensor values with temporal smoothing."""
     global _color_hist
 
     r = sensors.get('color_r', 0.0)
@@ -145,7 +166,7 @@ def detect_color(sensors):
     b = sensors.get('color_b', 0.0)
 
     _color_hist.append((r, g, b))
-    if len(_color_hist) > 5:
+    if len(_color_hist) > 8:
         _color_hist.pop(0)
 
     ar = sum(x[0] for x in _color_hist) / len(_color_hist)
@@ -159,35 +180,58 @@ def detect_color(sensors):
 
     if m < COLOR_CONFIDENCE_THRESHOLD:
         return None
-    if (m - second) < 0.04:
+    if (m - second) < 0.02:
         return None
     return best
 
 
-def _is_object_close(sensors, threshold):
-    """Per wrapper protocol: proximity is distance in metres; 1.0 means no object."""
-    p = sensors.get('proximity', 1.0)
-    return 0.0 < p < threshold
-
-
 def should_pick(sensors, carrying_box):
-    """Pick once close to box and not already carrying."""
-    global _carrying_box_state
+    """
+    Pickup FSM:
+      search  -> when near box, go settle
+      settle  -> keep robot stopped for SETTLE_FRAMES
+      pick_try-> return True repeatedly for PICK_TRY_FRAMES
+    """
+    global _carrying_box_state, _pick_state, _pick_timer
     _carrying_box_state = carrying_box
 
     if carrying_box:
+        _pick_state = "search"
+        _pick_timer = 0
         return False
-    return _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD)
+
+    near = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD)
+
+    if _pick_state == "search":
+        if near:
+            _pick_state = "settle"
+            _pick_timer = SETTLE_FRAMES
+        return False
+
+    if _pick_state == "settle":
+        _pick_timer -= 1
+        if _pick_timer <= 0:
+            _pick_state = "pick_try"
+            _pick_timer = PICK_TRY_FRAMES
+        return False
+
+    if _pick_state == "pick_try":
+        _pick_timer -= 1
+        if _pick_timer <= 0:
+            _pick_state = "search"  # failed this cycle; re-approach
+        return True
+
+    return False
 
 
 def should_drop(sensors, carrying_box, detected_color):
-    """Drop once close to drop zone and currently carrying."""
     global _carrying_box_state, _detected_color_state
     _carrying_box_state = carrying_box
     _detected_color_state = detected_color
 
     if not carrying_box:
         return False
+
     return _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
 # =============================================================================
 #  Main loop (Don't Edit this)
