@@ -120,8 +120,8 @@ def control_loop(sensors):
     global _integral_error, _prev_error, _last_line_seen_sign, _pick_state
 
     # Hard stop while stabilizing and picking near box
-    if _pick_state in ("settle", "pick_try") and not _carrying_box_state:
-        return 0.0, 0.0
+    #if _pick_state in ("settle", "pick_try") and not _carrying_box_state:
+       # return 0.0, 0.0
 
     error = _line_error(sensors)
 
@@ -193,7 +193,7 @@ def should_pick(sensors, carrying_box):
         return False
 
     p = sensors.get('proximity', 1.0)
-    return 0.0 < p < 0.135
+    return 0.0 < p < 0.155
 
 
 
@@ -238,7 +238,7 @@ def main():
             # --- Pick ---
             if not carrying_box and should_pick(last_sensors, carrying_box):
               client.send_motor_command(0.0, 0.0)
-              time.sleep(0.25)  # short settle
+              time.sleep(0.35)  # short settle
               success = client.send_pick()
               print(f"PICK attempted  — success={success}")
             if success:
