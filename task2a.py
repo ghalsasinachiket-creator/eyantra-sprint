@@ -117,6 +117,9 @@ def _is_object_close(sensors, threshold):
 
 
 def control_loop(sensors):
+    global _hold_until
+    if time.time() < _hold_until and not _carrying_box_state:
+      return 0.0, 0.0
     global _integral_error, _prev_error, _last_line_seen_sign, _pick_state
 
     # Hard stop while stabilizing and picking near box
