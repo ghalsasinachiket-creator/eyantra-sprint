@@ -77,8 +77,8 @@ DROP_PROXIMITY_THRESHOLD = 0.18
 COLOR_CONFIDENCE_THRESHOLD = 0.08
 
 # stop-at-box behavior
-SETTLE_FRAMES = 40      # 40 * 0.05 = 2.0 s
-PICK_TRY_FRAMES = 20    # 1.0 s of repeated pick attempts
+PICK_HOLD_SECONDS = 1.0
+PICK_TRY_FRAMES = 8      # repeated attempts if the first pick misses
 
 SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
 
@@ -94,6 +94,8 @@ _color_hist = []
 # pickup state machine: search -> settle -> pick_try
 _pick_state = "search"
 _pick_timer = 0
+_hold_until = 0.0
+_drop_inhibit_timer = 0
 
 DT = 0.05
 
@@ -117,14 +119,14 @@ def _is_object_close(sensors, threshold):
 
 
 def control_loop(sensors):
-    global _hold_until
-    if time.time() < _hold_until and not _carrying_box_state:
-      return 0.0, 0.0
-    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state
+    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until
 
-    # Hard stop while stabilizing and picking near box
-    #if _pick_state in ("settle", "pick_try") and not _carrying_box_state:
-       # return 0.0, 0.0
+    # Once the box is seen, do not let the PID command drive past it.
+    if (
+        not _carrying_box_state
+        and (_pick_state == "pick_try" or time.time() < _hold_until)
+    ):
+        return 0.0, 0.0
 
     error = _line_error(sensors)
 
@@ -189,24 +191,48 @@ def detect_color(sensors):
 
 
 def should_pick(sensors, carrying_box):
-    global _carrying_box_state
+    global _carrying_box_state, _pick_state, _pick_timer, _hold_until, _drop_inhibit_timer
     _carrying_box_state = carrying_box
 
     if carrying_box:
+        _pick_state = "done"
         return False
 
-    p = sensors.get('proximity', 1.0)
-    return 0.0 < p < 0.155
+    color_seen = max(
+        sensors.get('color_r', 0.0),
+        sensors.get('color_g', 0.0),
+        sensors.get('color_b', 0.0),
+    ) > COLOR_CONFIDENCE_THRESHOLD
+
+    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD) or color_seen
+    if box_seen and _pick_state == "search":
+        _pick_state = "pick_try"
+        _pick_timer = PICK_TRY_FRAMES
+        _hold_until = time.time() + PICK_HOLD_SECONDS
+
+    if _pick_state == "pick_try":
+        _pick_timer -= 1
+        _hold_until = time.time() + PICK_HOLD_SECONDS
+        _drop_inhibit_timer = 20
+        if _pick_timer <= 0:
+            _pick_state = "search"
+        return True
+
+    return False
 
 
 
 
 def should_drop(sensors, carrying_box, detected_color):
-    global _carrying_box_state, _detected_color_state
+    global _carrying_box_state, _detected_color_state, _drop_inhibit_timer
     _carrying_box_state = carrying_box
     _detected_color_state = detected_color
 
     if not carrying_box:
+        return False
+
+    if _drop_inhibit_timer > 0:
+        _drop_inhibit_timer -= 1
         return False
 
     return _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
