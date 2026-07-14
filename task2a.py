@@ -117,6 +117,8 @@ def _is_object_close(sensors, threshold):
     p = sensors.get('proximity', 1.0)
     return 0.0 < p < threshold
 
+_was_frozen = False  # add next to your other internal state vars, e.g. near _pick_state
+
 
 def control_loop(sensors):
     global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until
@@ -135,6 +137,11 @@ def control_loop(sensors):
         left = -search_speed * _last_line_seen_sign
         right =  search_speed * _last_line_seen_sign
         return left, right
+    
+    if _was_frozen:
+        _prev_error = error       # kills the derivative kick this frame
+        _integral_error = 0.0     # don't carry pre-pick windup into the resumed drive
+        _was_frozen = False
 
     if abs(error) > 1e-6:
         _last_line_seen_sign = 1.0 if error > 0 else -1.0
