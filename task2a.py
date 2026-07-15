@@ -185,16 +185,24 @@ def detect_color(sensors):
     ag = sum(x[1] for x in _color_hist) / len(_color_hist)
     ab = sum(x[2] for x in _color_hist) / len(_color_hist)
 
-    vals = {"red": ar, "green": ag, "blue": ab}
-    best = max(vals, key=vals.get)
-    m = vals[best]
-    second = sorted(vals.values(), reverse=True)[1]
+    #vals = {"red": ar, "green": ag, "blue": ab}
+    #best = max(vals, key=vals.get)
+    #m = vals[best]
+    #second = sorted(vals.values(), reverse=True)[1]
 
-    if m < COLOR_CONFIDENCE_THRESHOLD:
-        return None
-    if (m - second) < 0.02:
-        return None
-    return best
+    #if m < COLOR_CONFIDENCE_THRESHOLD:
+    #    return None
+    #if (m - second) < 0.02:
+    #    return None
+
+    # Strong channel wins (more conservative, less false red/green)
+    if ab > 0.20 and ab > ar + 0.05 and ab > ag + 0.05:
+        return "blue"
+    if ar > 0.20 and ar > ag + 0.05 and ar > ab + 0.05:
+        return "red"
+    if ag > 0.20 and ag > ar + 0.05 and ag > ab + 0.05:
+        return "green"
+    return None
 
 
 def should_pick(sensors, carrying_box):
@@ -211,7 +219,7 @@ def should_pick(sensors, carrying_box):
         sensors.get('color_b', 0.0),
     ) > COLOR_CONFIDENCE_THRESHOLD
 
-    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD) or color_seen
+    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD) #or color_seen
     if box_seen and _pick_state == "search":
         _pick_state = "pick_try"
         _pick_timer = PICK_TRY_FRAMES
@@ -265,11 +273,20 @@ def main():
                 continue
 
             # --- Color detection (once, before picking) ---
+           # if detected_color is None and not carrying_box:
+              #  color = detect_color(last_sensors)
+             #   if color is not None:
+                #    detected_color = color
+                #    print(f"Color detected: {color!r}")
             if detected_color is None and not carrying_box:
-                color = detect_color(last_sensors)
-                if color is not None:
-                    detected_color = color
-                    print(f"Color detected: {color!r}")
+               p = last_sensors.get('proximity', 1.0)
+               near_box = 0.0 < p < PICK_PROXIMITY_THRESHOLD
+               if near_box:
+                 color = detect_color(last_sensors)
+               if color is not None:
+                 detected_color = color
+                 print(f"Color detected: {color!r}")
+
 
             # --- Pick ---
             if not carrying_box and should_pick(last_sensors, carrying_box):
