@@ -51,15 +51,17 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 # =============================================================================
 
 # ---- Tunable constants -----------------------------------------------------
-BASE_SPEED = 3.0
-KP = 5.2
+BASE_SPEED = 1.6
+APPROACH_SPEED = 0.8
+KP = 3.0
 KI = 0.0
-KD = 1.4
-MAX_CORRECTION = 3.2
-MAX_SPEED = 4.0
-BRANCH_STEER = 1.15
-BRANCH_MAX_CORRECTION = 2.35
-BRANCH_BASE_SPEED = 2.25
+KD = 0.65
+MAX_CORRECTION = 1.15
+MAX_SPEED = 2.4
+BRANCH_STEER = 0.42
+BRANCH_MAX_CORRECTION = 0.95
+BRANCH_BASE_SPEED = 1.15
+MIN_CARRY_SPEED = 0.20
 
 PICK_PROXIMITY_THRESHOLD = 0.22
 DROP_PROXIMITY_THRESHOLD = 0.16
@@ -71,6 +73,7 @@ PICK_HOLD_SECONDS = 0.35
 PICK_TRY_FRAMES = 1          # one PICK command per approach window
 MAX_PICK_ATTEMPTS = 3        # attempt windows before backing off and retrying approach
 BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
+ERROR_SMOOTH_ALPHA = 0.45
 
 # The arena has one branch node after pickup:
 #   red = left branch, blue = straight branch, green = right branch.
@@ -87,6 +90,7 @@ SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
 # ---- Internal state --------------------------------------------------------
 _integral_error = 0.0
 _prev_error = 0.0
+_filtered_error = 0.0
 _last_line_seen_sign = 1.0
 
 _carrying_box_state = False
@@ -144,7 +148,7 @@ def _is_object_close(sensors, threshold):
 
 
 def control_loop(sensors):
-    global _integral_error, _prev_error, _last_line_seen_sign
+    global _integral_error, _prev_error, _filtered_error, _last_line_seen_sign
     global _pick_state, _hold_until, _was_frozen, _backoff_until
 
     # --- Backing off after repeated failed pick attempts ---
@@ -164,15 +168,22 @@ def control_loop(sensors):
     error = _line_error(sensors)
 
     if error is None:
-        search_speed = 1.2
+        search_speed = 0.55
         left = -search_speed * _last_line_seen_sign
         right = search_speed * _last_line_seen_sign
         return left, right
 
     if _was_frozen:
         _prev_error = error       # kills the derivative kick this frame
+        _filtered_error = error
         _integral_error = 0.0     # don't carry pre-pick/backoff windup into
         _was_frozen = False       # the resumed drive
+
+    _filtered_error = (
+        (1.0 - ERROR_SMOOTH_ALPHA) * _filtered_error
+        + ERROR_SMOOTH_ALPHA * error
+    )
+    error = _filtered_error
 
     if abs(error) > 1e-6:
         _last_line_seen_sign = 1.0 if error > 0 else -1.0
@@ -196,9 +207,22 @@ def control_loop(sensors):
     correction_limit = BRANCH_MAX_CORRECTION if branch_turn else MAX_CORRECTION
     correction = max(-correction_limit, min(correction_limit, correction))
 
+    color_visible = max(
+        sensors.get('color_r', 0.0),
+        sensors.get('color_g', 0.0),
+        sensors.get('color_b', 0.0),
+    ) > COLOR_CONFIDENCE_THRESHOLD
     base_speed = BRANCH_BASE_SPEED if branch_turn else BASE_SPEED
+    if not _carrying_box_state and color_visible:
+        base_speed = APPROACH_SPEED
+
     left = base_speed + correction
     right = base_speed - correction
+
+    if _carrying_box_state:
+        left = max(MIN_CARRY_SPEED, left)
+        right = max(MIN_CARRY_SPEED, right)
+
     left = max(-MAX_SPEED, min(MAX_SPEED, left))
     right = max(-MAX_SPEED, min(MAX_SPEED, right))
     return left, right
@@ -223,7 +247,7 @@ def _track_junction(at_junction):
 
 
 def detect_color(sensors):
-    global _color_hist
+    global _color_hist, _detected_color_state
 
     r = sensors.get('color_r', 0.0)
     g = sensors.get('color_g', 0.0)
@@ -249,6 +273,7 @@ def detect_color(sensors):
         return None
     if (m - second) < 0.02:
         return None
+    _detected_color_state = best
     return best
 
 
@@ -266,7 +291,10 @@ def should_pick(sensors, carrying_box):
     if time.time() < _backoff_until:
         return False
 
-    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD)
+    box_seen = (
+        _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD)
+        and _detected_color_state is not None
+    )
     if box_seen and _pick_state == "search":
         _pick_state = "pick_try"
         _pick_timer = PICK_TRY_FRAMES
