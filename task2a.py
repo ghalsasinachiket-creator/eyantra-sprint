@@ -229,7 +229,8 @@ def should_pick(sensors, carrying_box):
 def should_drop(sensors, carrying_box, detected_color):
     global _carrying_box_state, _detected_color_state, _drop_inhibit_timer
     _carrying_box_state = carrying_box
-    _detected_color_state = detected_color
+    if detected_color is not None:
+      _detected_color_state = detected_color
 
     if not carrying_box:
         return False
@@ -284,8 +285,8 @@ def main():
               time.sleep(0.35)  # short settle
               success = client.send_pick()
               print(f"PICK attempted  — success={success}")
-            if success:
-              carrying_box = True
+              if success:
+               carrying_box = True
 
             # --- Drop ---
             if carrying_box and should_drop(last_sensors, carrying_box, detected_color):
