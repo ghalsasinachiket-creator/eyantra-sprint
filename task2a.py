@@ -52,27 +52,29 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 
 # ---- Tunable constants -----------------------------------------------------
 BASE_SPEED = 3.0
-KP = 6.0
-KI = 0.02
-KD = 1.8
-MAX_CORRECTION = 3.5
+KP = 5.2
+KI = 0.0
+KD = 1.4
+MAX_CORRECTION = 3.2
+MAX_SPEED = 4.0
 
-PICK_PROXIMITY_THRESHOLD = 0.20
-DROP_PROXIMITY_THRESHOLD = 0.18
-COLOR_CONFIDENCE_THRESHOLD = 0.08
+PICK_PROXIMITY_THRESHOLD = 0.22
+DROP_PROXIMITY_THRESHOLD = 0.16
+COLOR_CONFIDENCE_THRESHOLD = 0.05
+LINE_THRESHOLD = 0.03
 
 # stop-at-box behavior
-PICK_HOLD_SECONDS = 1.0
-PICK_TRY_FRAMES = 8          # frames per pick attempt window
+PICK_HOLD_SECONDS = 0.35
+PICK_TRY_FRAMES = 1          # one PICK command per approach window
 MAX_PICK_ATTEMPTS = 3        # attempt windows before backing off and retrying approach
 BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
 
-# Node-counting for drop: which junction (1-indexed, counted only while
-# carrying) each color should be dropped at. TUNE THESE to match your arena.
-DROP_NODE_BY_COLOR = {
-    "red": 1,
-    "green": 2,
-    "blue": 3,
+# The arena has one branch node after pickup:
+#   red = left branch, blue = straight branch, green = right branch.
+TURN_BY_COLOR = {
+    "red": -1,
+    "blue": 0,
+    "green": 1,
 }
 
 SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
@@ -94,9 +96,10 @@ _drop_inhibit_timer = 0
 _pick_attempts = 0
 _backoff_until = 0.0
 
-# drop-by-node tracking
+# junction tracking while carrying
 _junction_count = 0
 _was_at_junction = False
+_branch_committed = False
 
 _was_frozen = False  # set True whenever control_loop freezes the robot
 
@@ -104,15 +107,29 @@ DT = 0.05
 
 
 def _line_error(sensors):
-    total_weight = 0.0
-    total_signal = 0.0
-    for w, key in zip(SENSOR_WEIGHTS, SENSOR_ORDER):
-        v = sensors.get(key, 0.0)
-        total_weight += w * v
-        total_signal += v
-    if total_signal < 1e-3:
+    vals = [sensors.get(key, 0.0) for key in SENSOR_ORDER]
+    lo = min(vals)
+    hi = max(vals)
+    contrast = hi - lo
+    if contrast < LINE_THRESHOLD:
         return None
-    return total_weight / total_signal
+
+    bright_strengths = [(v - lo) / contrast for v in vals]
+    dark_strengths = [(hi - v) / contrast for v in vals]
+
+    # Some scenes report "line = high"; others effectively report the dark
+    # track as the strongest signal. Pick the narrower pattern each frame.
+    strengths = (
+        bright_strengths
+        if sum(bright_strengths) <= sum(dark_strengths)
+        else dark_strengths
+    )
+
+    total_signal = sum(strengths)
+    if total_signal < LINE_THRESHOLD:
+        return None
+
+    return sum(w * v for w, v in zip(SENSOR_WEIGHTS, strengths)) / total_signal
 
 
 def _is_object_close(sensors, threshold):
@@ -155,18 +172,13 @@ def control_loop(sensors):
     if abs(error) > 1e-6:
         _last_line_seen_sign = 1.0 if error > 0 else -1.0
 
-    at_junction = (
-        sensors.get('left_corner', 0.0) > 0.35 and
-        sensors.get('right_corner', 0.0) > 0.35
-    )
+    line_vals = [sensors.get(key, 0.0) for key in SENSOR_ORDER]
+    at_junction = sum(1 for v in line_vals if v > 0.35) >= 4
     _track_junction(at_junction)
 
-    if at_junction and _carrying_box_state:
-        if _detected_color_state == "red":
-            error -= 2.0  # left
-        elif _detected_color_state == "green":
-            error += 2.0  # right
-        # blue/unknown => straight
+    if at_junction and _carrying_box_state and not _branch_committed:
+        turn = TURN_BY_COLOR.get(_detected_color_state, 0)
+        error += 2.4 * turn
 
     _integral_error += error * DT
     derivative = (error - _prev_error) / DT
@@ -177,17 +189,21 @@ def control_loop(sensors):
 
     left = BASE_SPEED + correction
     right = BASE_SPEED - correction
+    left = max(-MAX_SPEED, min(MAX_SPEED, left))
+    right = max(-MAX_SPEED, min(MAX_SPEED, right))
     return left, right
 
 
 def _track_junction(at_junction):
     """Counts junction crossings only while carrying a box (rising edge)."""
-    global _junction_count, _was_at_junction
+    global _junction_count, _was_at_junction, _branch_committed
     if not _carrying_box_state:
         _was_at_junction = at_junction
         return
     if at_junction and not _was_at_junction:
         _junction_count += 1
+        if _junction_count >= 1:
+            _branch_committed = True
     _was_at_junction = at_junction
 
 
@@ -197,6 +213,9 @@ def detect_color(sensors):
     r = sensors.get('color_r', 0.0)
     g = sensors.get('color_g', 0.0)
     b = sensors.get('color_b', 0.0)
+
+    if max(r, g, b) < COLOR_CONFIDENCE_THRESHOLD:
+        return None
 
     _color_hist.append((r, g, b))
     if len(_color_hist) > 8:
@@ -232,13 +251,7 @@ def should_pick(sensors, carrying_box):
     if time.time() < _backoff_until:
         return False
 
-    color_seen = max(
-        sensors.get('color_r', 0.0),
-        sensors.get('color_g', 0.0),
-        sensors.get('color_b', 0.0),
-    ) > COLOR_CONFIDENCE_THRESHOLD
-
-    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD) or color_seen
+    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD)
     if box_seen and _pick_state == "search":
         _pick_state = "pick_try"
         _pick_timer = PICK_TRY_FRAMES
@@ -264,10 +277,11 @@ def should_pick(sensors, carrying_box):
 def _on_pick_success():
     """Call this (see note in main-loop guidance) to reset attempt state
     and start counting junctions fresh for the drop-by-node logic."""
-    global _pick_attempts, _junction_count, _was_at_junction
+    global _pick_attempts, _junction_count, _was_at_junction, _branch_committed
     _pick_attempts = 0
     _junction_count = 0
     _was_at_junction = False
+    _branch_committed = False
 
 
 def should_drop(sensors, carrying_box, detected_color):
@@ -289,15 +303,9 @@ def should_drop(sensors, carrying_box, detected_color):
         _drop_inhibit_timer -= 1
         return False
 
-    target_node = DROP_NODE_BY_COLOR.get(_detected_color_state)
-
-    # Primary rule: drop once we've passed the correct junction for this
-    # color. Proximity is kept as a fallback so we don't sail past a
-    # dead-end/wall at the drop zone if node counting misses a beat.
-    reached_node = target_node is not None and _junction_count >= target_node
-    reached_wall = _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
-
-    return reached_node or reached_wall
+    # The first junction chooses the branch. Drop only after entering a branch
+    # and reaching the dead-end/drop-zone object there.
+    return _branch_committed and _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
 
 # =============================================================================
 #  Main loop (Don't Edit this)
