@@ -174,11 +174,12 @@ def control_loop(sensors):
 
     line_vals = [sensors.get(key, 0.0) for key in SENSOR_ORDER]
     at_junction = sum(1 for v in line_vals if v > 0.35) >= 4
-    _track_junction(at_junction)
 
     if at_junction and _carrying_box_state and not _branch_committed:
         turn = TURN_BY_COLOR.get(_detected_color_state, 0)
         error += 2.4 * turn
+
+    _track_junction(at_junction)
 
     _integral_error += error * DT
     derivative = (error - _prev_error) / DT
@@ -195,15 +196,20 @@ def control_loop(sensors):
 
 
 def _track_junction(at_junction):
-    """Counts junction crossings only while carrying a box (rising edge)."""
+    """Count the first branch node and commit only after leaving it.
+
+    Red/green need a steering bias for several frames while the robot is on
+    the node. If we commit on the rising edge, the bias disappears instantly
+    and the robot continues on the default blue/straight route.
+    """
     global _junction_count, _was_at_junction, _branch_committed
     if not _carrying_box_state:
         _was_at_junction = at_junction
         return
     if at_junction and not _was_at_junction:
         _junction_count += 1
-        if _junction_count >= 1:
-            _branch_committed = True
+    if not at_junction and _was_at_junction and _junction_count >= 1:
+        _branch_committed = True
     _was_at_junction = at_junction
 
 
