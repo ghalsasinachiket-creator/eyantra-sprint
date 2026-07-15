@@ -328,15 +328,14 @@ def main():
     try:
         while True:
             sensors = client.receive_sensor_data()
-            if sensors is not None:
-                last_sensors = sensors
-            if last_sensors is None:
-                time.sleep(0.02)
+            if sensors is None:
+                time.sleep(0.01)
                 continue
+            last_sensors = sensors
 
-            if detected_color is None and not carrying_box:
+            if detected_color is None:
                p = last_sensors.get('proximity', 1.0)
-               near_box = 0.0 < p < PICK_PROXIMITY_THRESHOLD
+               near_box = carrying_box or (0.0 < p < PICK_PROXIMITY_THRESHOLD)
                if near_box:
                  color = detect_color(last_sensors)
                  if color is not None:
@@ -351,6 +350,8 @@ def main():
               print(f"PICK attempted  — success={success}")
               if success:
                carrying_box = True
+              time.sleep(0.05)
+              continue
 
             # --- Drop ---
             if carrying_box and should_drop(last_sensors, carrying_box, detected_color):
@@ -359,6 +360,8 @@ def main():
                 if success:
                     carrying_box = False
                     detected_color = None
+                time.sleep(0.05)
+                continue
 
             # --- Motor command ---
             left, right = control_loop(last_sensors)
