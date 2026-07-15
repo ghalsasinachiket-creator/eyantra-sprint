@@ -118,16 +118,15 @@ def _is_object_close(sensors, threshold):
     return 0.0 < p < threshold
 
 _was_frozen = False  # add next to your other internal state vars, e.g. near _pick_state
-
-
 def control_loop(sensors):
-    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until
+    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until, _was_frozen
 
     # Once the box is seen, do not let the PID command drive past it.
     if (
         not _carrying_box_state
         and (_pick_state == "pick_try" or time.time() < _hold_until)
     ):
+        _was_frozen = True
         return 0.0, 0.0
 
     error = _line_error(sensors)
@@ -137,10 +136,10 @@ def control_loop(sensors):
         left = -search_speed * _last_line_seen_sign
         right =  search_speed * _last_line_seen_sign
         return left, right
-    
+
     if _was_frozen:
-        _prev_error = error       # kills the derivative kick this frame
-        _integral_error = 0.0     # don't carry pre-pick windup into the resumed drive
+        _prev_error = error
+        _integral_error = 0.0
         _was_frozen = False
 
     if abs(error) > 1e-6:
@@ -152,10 +151,14 @@ def control_loop(sensors):
     )
 
     if at_junction and _carrying_box_state:
+        # 3) Reset PID integral at junction when carrying
+        _integral_error = 0.0
+
+        # reduced bias to avoid overshoot/circling
         if _detected_color_state == "red":
-            error -= 2.0  # left
+            error -= 1.1
         elif _detected_color_state == "green":
-            error += 2.0  # right
+            error += 1.1
         # blue/unknown => straight
 
     _integral_error += error * DT
@@ -167,7 +170,62 @@ def control_loop(sensors):
 
     left = BASE_SPEED + correction
     right = BASE_SPEED - correction
+
+    # 2) Add wheel speed clamp (prevents spin/circles)
+    left = max(-3.5, min(3.5, left))
+    right = max(-3.5, min(3.5, right))
+
     return left, right
+
+#def control_loop(sensors):
+  #  global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until
+
+    # Once the box is seen, do not let the PID command drive past it.
+   # if (
+    #    not _carrying_box_state
+     #   and (_pick_state == "pick_try" or time.time() < _hold_until)
+   # ):
+    #    return 0.0, 0.0
+
+    #error = _line_error(sensors)
+
+    #if error is None:
+       #  left = -search_speed * _last_line_seen_sign
+        #right =  search_speed * _last_line_seen_sign
+      #  return left, right
+    
+    #if _was_frozen:
+        #_prev_error = error       # kills the derivative kick this frame
+        #_integral_error = 0.0     # don't carry pre-pick windup into the resumed drive
+        #_was_frozen = False
+
+    #if abs(error) > 1e-6:
+   #     _last_line_seen_sign = 1.0 if error > 0 else -1.0
+
+   # at_junction = (
+    #    sensors.get('left_corner', 0.0) > 0.35 and
+    #    sensors.get('right_corner', 0.0) > 0.35
+    #)
+
+    #if at_junction and _carrying_box_state:
+     #   if _detected_color_state == "red":
+      #      #error -= 2.0  # left
+      #      error -= 1.1 
+       # elif _detected_color_state == "green":
+            #error += 2.0  # right
+            #error += 1.1
+        ## blue/unknown => straight
+
+    #_integral_error += error * DT
+    #derivative = (error - _prev_error) / DT
+    #_prev_error = error
+
+    #correction = KP * error + KI * _integral_error + KD * derivative
+    #correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, correction))
+
+    #left = BASE_SPEED + correction
+    #right = BASE_SPEED - correction
+    #return left, right
 
 
 def detect_color(sensors):
