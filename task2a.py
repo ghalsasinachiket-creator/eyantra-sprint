@@ -57,6 +57,9 @@ KI = 0.0
 KD = 1.4
 MAX_CORRECTION = 3.2
 MAX_SPEED = 4.0
+BRANCH_STEER = 1.15
+BRANCH_MAX_CORRECTION = 2.35
+BRANCH_BASE_SPEED = 2.25
 
 PICK_PROXIMITY_THRESHOLD = 0.22
 DROP_PROXIMITY_THRESHOLD = 0.16
@@ -72,9 +75,11 @@ BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
 # The arena has one branch node after pickup:
 #   red = left branch, blue = straight branch, green = right branch.
 TURN_BY_COLOR = {
-    "red": -1,
+    # Positive branch bias turns this robot toward the left arm at the node;
+    # negative turns it toward the right arm.
+    "red": 1,
     "blue": 0,
-    "green": 1,
+    "green": -1,
 }
 
 SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
@@ -175,9 +180,9 @@ def control_loop(sensors):
     line_vals = [sensors.get(key, 0.0) for key in SENSOR_ORDER]
     at_junction = sum(1 for v in line_vals if v > 0.35) >= 4
 
+    branch_turn = 0
     if at_junction and _carrying_box_state and not _branch_committed:
-        turn = TURN_BY_COLOR.get(_detected_color_state, 0)
-        error += 2.4 * turn
+        branch_turn = TURN_BY_COLOR.get(_detected_color_state, 0)
 
     _track_junction(at_junction)
 
@@ -186,10 +191,14 @@ def control_loop(sensors):
     _prev_error = error
 
     correction = KP * error + KI * _integral_error + KD * derivative
-    correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, correction))
+    correction += BRANCH_STEER * branch_turn
 
-    left = BASE_SPEED + correction
-    right = BASE_SPEED - correction
+    correction_limit = BRANCH_MAX_CORRECTION if branch_turn else MAX_CORRECTION
+    correction = max(-correction_limit, min(correction_limit, correction))
+
+    base_speed = BRANCH_BASE_SPEED if branch_turn else BASE_SPEED
+    left = base_speed + correction
+    right = base_speed - correction
     left = max(-MAX_SPEED, min(MAX_SPEED, left))
     right = max(-MAX_SPEED, min(MAX_SPEED, right))
     return left, right
