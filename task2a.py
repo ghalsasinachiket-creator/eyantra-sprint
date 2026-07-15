@@ -32,7 +32,7 @@ TASK FLOW
   2. When the robot is close to the box (proximity low), read the color,
      stop, and send a PICK command.
   3. Robot carries the box and continues following the line.
-  4. At the correct drop zone, send a DROP command.A
+  4. At the correct drop zone, send a DROP command.
 
 Team ID: [ 403 ]
 """
@@ -50,17 +50,6 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 #  You may add helper functions anywhere in this section.
 # =============================================================================
 
-# =============================================================================
-#  TODO (participants): implement the four functions below.
-#  You may add helper functions anywhere in this section.
-# =============================================================================
-
-# =============================================================================
-#  TODO (participants): implement the four functions below.
-#  You may add helper functions anywhere in this section.
-# =============================================================================
-
-```
 # ---- Tunable constants -----------------------------------------------------
 BASE_SPEED = 3.0
 KP = 6.0
@@ -74,7 +63,17 @@ COLOR_CONFIDENCE_THRESHOLD = 0.08
 
 # stop-at-box behavior
 PICK_HOLD_SECONDS = 1.0
-PICK_TRY_FRAMES = 8      # repeated attempts if the first pick misses
+PICK_TRY_FRAMES = 8          # frames per pick attempt window
+MAX_PICK_ATTEMPTS = 3        # attempt windows before backing off and retrying approach
+BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
+
+# Node-counting for drop: which junction (1-indexed, counted only while
+# carrying) each color should be dropped at. TUNE THESE to match your arena.
+DROP_NODE_BY_COLOR = {
+    "red": 1,
+    "green": 2,
+    "blue": 3,
+}
 
 SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
 
@@ -87,11 +86,19 @@ _carrying_box_state = False
 _detected_color_state = None
 _color_hist = []
 
-# pickup state machine: search -> settle -> pick_try
+# pickup state machine: search -> settle -> pick_try -> backoff
 _pick_state = "search"
 _pick_timer = 0
 _hold_until = 0.0
 _drop_inhibit_timer = 0
+_pick_attempts = 0
+_backoff_until = 0.0
+
+# drop-by-node tracking
+_junction_count = 0
+_was_at_junction = False
+
+_was_frozen = False  # set True whenever control_loop freezes the robot
 
 DT = 0.05
 
@@ -113,31 +120,37 @@ def _is_object_close(sensors, threshold):
     p = sensors.get('proximity', 1.0)
     return 0.0 < p < threshold
 
-_was_frozen = False  # add next to your other internal state vars, e.g. near _pick_state
-
 
 def control_loop(sensors):
-    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until
+    global _integral_error, _prev_error, _last_line_seen_sign
+    global _pick_state, _hold_until, _was_frozen, _backoff_until
 
-    # Once the box is seen, do not let the PID command drive past it.
+    # --- Backing off after repeated failed pick attempts ---
+    if not _carrying_box_state and time.time() < _backoff_until:
+        _was_frozen = True
+        return -1.0, -1.0  # reverse slightly to re-approach
+
+    # --- Freeze while attempting a pick ---
     if (
         not _carrying_box_state
         and (_pick_state == "pick_try" or time.time() < _hold_until)
     ):
-        return 0.0, 0.0
+        _was_frozen = True  # BUGFIX: this flag was declared but never set,
+        return 0.0, 0.0     # which let stale PID error terms cause a swerve
+                             # the instant the robot resumed after a pick.
 
     error = _line_error(sensors)
 
     if error is None:
         search_speed = 1.2
         left = -search_speed * _last_line_seen_sign
-        right =  search_speed * _last_line_seen_sign
+        right = search_speed * _last_line_seen_sign
         return left, right
-    
+
     if _was_frozen:
         _prev_error = error       # kills the derivative kick this frame
-        _integral_error = 0.0     # don't carry pre-pick windup into the resumed drive
-        _was_frozen = False
+        _integral_error = 0.0     # don't carry pre-pick/backoff windup into
+        _was_frozen = False       # the resumed drive
 
     if abs(error) > 1e-6:
         _last_line_seen_sign = 1.0 if error > 0 else -1.0
@@ -146,6 +159,7 @@ def control_loop(sensors):
         sensors.get('left_corner', 0.0) > 0.35 and
         sensors.get('right_corner', 0.0) > 0.35
     )
+    _track_junction(at_junction)
 
     if at_junction and _carrying_box_state:
         if _detected_color_state == "red":
@@ -164,6 +178,17 @@ def control_loop(sensors):
     left = BASE_SPEED + correction
     right = BASE_SPEED - correction
     return left, right
+
+
+def _track_junction(at_junction):
+    """Counts junction crossings only while carrying a box (rising edge)."""
+    global _junction_count, _was_at_junction
+    if not _carrying_box_state:
+        _was_at_junction = at_junction
+        return
+    if at_junction and not _was_at_junction:
+        _junction_count += 1
+    _was_at_junction = at_junction
 
 
 def detect_color(sensors):
@@ -194,11 +219,17 @@ def detect_color(sensors):
 
 
 def should_pick(sensors, carrying_box):
-    global _carrying_box_state, _pick_state, _pick_timer, _hold_until, _drop_inhibit_timer
+    global _carrying_box_state, _pick_state, _pick_timer, _hold_until
+    global _drop_inhibit_timer, _pick_attempts, _backoff_until
+    global _junction_count, _was_at_junction
+
     _carrying_box_state = carrying_box
 
     if carrying_box:
         _pick_state = "done"
+        return False
+
+    if time.time() < _backoff_until:
         return False
 
     color_seen = max(
@@ -218,28 +249,55 @@ def should_pick(sensors, carrying_box):
         _hold_until = time.time() + PICK_HOLD_SECONDS
         _drop_inhibit_timer = 20
         if _pick_timer <= 0:
+            _pick_attempts += 1
+            if _pick_attempts >= MAX_PICK_ATTEMPTS:
+                # Repeated failed attempts: back off and re-approach instead
+                # of looping search<->pick_try forever in place.
+                _pick_attempts = 0
+                _backoff_until = time.time() + BACKOFF_SECONDS
             _pick_state = "search"
         return True
 
     return False
 
 
+def _on_pick_success():
+    """Call this (see note in main-loop guidance) to reset attempt state
+    and start counting junctions fresh for the drop-by-node logic."""
+    global _pick_attempts, _junction_count, _was_at_junction
+    _pick_attempts = 0
+    _junction_count = 0
+    _was_at_junction = False
 
 
 def should_drop(sensors, carrying_box, detected_color):
     global _carrying_box_state, _detected_color_state, _drop_inhibit_timer
+
+    was_carrying = _carrying_box_state
     _carrying_box_state = carrying_box
     if detected_color is not None:
-      _detected_color_state = detected_color
+        _detected_color_state = detected_color
 
     if not carrying_box:
         return False
+
+    if not was_carrying:
+        # Just picked up this frame — reset node/attempt tracking.
+        _on_pick_success()
 
     if _drop_inhibit_timer > 0:
         _drop_inhibit_timer -= 1
         return False
 
-    return _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
+    target_node = DROP_NODE_BY_COLOR.get(_detected_color_state)
+
+    # Primary rule: drop once we've passed the correct junction for this
+    # color. Proximity is kept as a fallback so we don't sail past a
+    # dead-end/wall at the drop zone if node counting misses a beat.
+    reached_node = target_node is not None and _junction_count >= target_node
+    reached_wall = _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
+
+    return reached_node or reached_wall
 
 # =============================================================================
 #  Main loop (Don't Edit this)
@@ -262,13 +320,6 @@ def main():
                 time.sleep(0.02)
                 continue
 
-            # --- Color detection (once, before picking) ---
-           # if detected_color is None and not carrying_box:
-              #  color = detect_color(last_sensors)
-             #   if color is not None:
-                #    detected_color = color
-                #    print(f"Color detected: {color!r}")
-            
             if detected_color is None and not carrying_box:
                p = last_sensors.get('proximity', 1.0)
                near_box = 0.0 < p < PICK_PROXIMITY_THRESHOLD
@@ -277,7 +328,6 @@ def main():
                  if color is not None:
                    detected_color = color
                    print(f"Color detected: {color!r}")
-
 
             # --- Pick ---
             if not carrying_box and should_pick(last_sensors, carrying_box):
@@ -294,6 +344,7 @@ def main():
                 print(f"DROP attempted  — success={success}")
                 if success:
                     carrying_box = False
+                    detected_color = None
 
             # --- Motor command ---
             left, right = control_loop(last_sensors)
@@ -312,5 +363,5 @@ def main():
 
 
 if __name__ == "__main__":
-    
+
     main()
