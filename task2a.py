@@ -60,11 +60,7 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 #  You may add helper functions anywhere in this section.
 # =============================================================================
 
-# =============================================================================
-#  TODO (participants): implement the four functions below.
-#  You may add helper functions anywhere in this section.
-# =============================================================================
-
+```
 # ---- Tunable constants -----------------------------------------------------
 BASE_SPEED = 3.0
 KP = 6.0
@@ -118,15 +114,16 @@ def _is_object_close(sensors, threshold):
     return 0.0 < p < threshold
 
 _was_frozen = False  # add next to your other internal state vars, e.g. near _pick_state
+
+
 def control_loop(sensors):
-    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until, _was_frozen
+    global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until
 
     # Once the box is seen, do not let the PID command drive past it.
     if (
         not _carrying_box_state
         and (_pick_state == "pick_try" or time.time() < _hold_until)
     ):
-        _was_frozen = True
         return 0.0, 0.0
 
     error = _line_error(sensors)
@@ -136,10 +133,10 @@ def control_loop(sensors):
         left = -search_speed * _last_line_seen_sign
         right =  search_speed * _last_line_seen_sign
         return left, right
-
+    
     if _was_frozen:
-        _prev_error = error
-        _integral_error = 0.0
+        _prev_error = error       # kills the derivative kick this frame
+        _integral_error = 0.0     # don't carry pre-pick windup into the resumed drive
         _was_frozen = False
 
     if abs(error) > 1e-6:
@@ -151,14 +148,10 @@ def control_loop(sensors):
     )
 
     if at_junction and _carrying_box_state:
-        # 3) Reset PID integral at junction when carrying
-        _integral_error = 0.0
-
-        # reduced bias to avoid overshoot/circling
         if _detected_color_state == "red":
-            error -= 1.1
+            error -= 2.0  # left
         elif _detected_color_state == "green":
-            error += 1.1
+            error += 2.0  # right
         # blue/unknown => straight
 
     _integral_error += error * DT
@@ -170,62 +163,7 @@ def control_loop(sensors):
 
     left = BASE_SPEED + correction
     right = BASE_SPEED - correction
-
-    # 2) Add wheel speed clamp (prevents spin/circles)
-    left = max(-3.5, min(3.5, left))
-    right = max(-3.5, min(3.5, right))
-
     return left, right
-
-#def control_loop(sensors):
-  #  global _integral_error, _prev_error, _last_line_seen_sign, _pick_state, _hold_until
-
-    # Once the box is seen, do not let the PID command drive past it.
-   # if (
-    #    not _carrying_box_state
-     #   and (_pick_state == "pick_try" or time.time() < _hold_until)
-   # ):
-    #    return 0.0, 0.0
-
-    #error = _line_error(sensors)
-
-    #if error is None:
-       #  left = -search_speed * _last_line_seen_sign
-        #right =  search_speed * _last_line_seen_sign
-      #  return left, right
-    
-    #if _was_frozen:
-        #_prev_error = error       # kills the derivative kick this frame
-        #_integral_error = 0.0     # don't carry pre-pick windup into the resumed drive
-        #_was_frozen = False
-
-    #if abs(error) > 1e-6:
-   #     _last_line_seen_sign = 1.0 if error > 0 else -1.0
-
-   # at_junction = (
-    #    sensors.get('left_corner', 0.0) > 0.35 and
-    #    sensors.get('right_corner', 0.0) > 0.35
-    #)
-
-    #if at_junction and _carrying_box_state:
-     #   if _detected_color_state == "red":
-      #      #error -= 2.0  # left
-      #      error -= 1.1 
-       # elif _detected_color_state == "green":
-            #error += 2.0  # right
-            #error += 1.1
-        ## blue/unknown => straight
-
-    #_integral_error += error * DT
-    #derivative = (error - _prev_error) / DT
-    #_prev_error = error
-
-    #correction = KP * error + KI * _integral_error + KD * derivative
-    #correction = max(-MAX_CORRECTION, min(MAX_CORRECTION, correction))
-
-    #left = BASE_SPEED + correction
-    #right = BASE_SPEED - correction
-    #return left, right
 
 
 def detect_color(sensors):
@@ -243,24 +181,16 @@ def detect_color(sensors):
     ag = sum(x[1] for x in _color_hist) / len(_color_hist)
     ab = sum(x[2] for x in _color_hist) / len(_color_hist)
 
-    #vals = {"red": ar, "green": ag, "blue": ab}
-    #best = max(vals, key=vals.get)
-    #m = vals[best]
-    #second = sorted(vals.values(), reverse=True)[1]
+    vals = {"red": ar, "green": ag, "blue": ab}
+    best = max(vals, key=vals.get)
+    m = vals[best]
+    second = sorted(vals.values(), reverse=True)[1]
 
-    #if m < COLOR_CONFIDENCE_THRESHOLD:
-    #    return None
-    #if (m - second) < 0.02:
-    #    return None
-
-    # Strong channel wins (more conservative, less false red/green)
-    if ab > 0.20 and ab > ar + 0.05 and ab > ag + 0.05:
-        return "blue"
-    if ar > 0.20 and ar > ag + 0.05 and ar > ab + 0.05:
-        return "red"
-    if ag > 0.20 and ag > ar + 0.05 and ag > ab + 0.05:
-        return "green"
-    return None
+    if m < COLOR_CONFIDENCE_THRESHOLD:
+        return None
+    if (m - second) < 0.02:
+        return None
+    return best
 
 
 def should_pick(sensors, carrying_box):
@@ -277,7 +207,7 @@ def should_pick(sensors, carrying_box):
         sensors.get('color_b', 0.0),
     ) > COLOR_CONFIDENCE_THRESHOLD
 
-    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD) #or color_seen
+    box_seen = _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD) or color_seen
     if box_seen and _pick_state == "search":
         _pick_state = "pick_try"
         _pick_timer = PICK_TRY_FRAMES
@@ -309,6 +239,7 @@ def should_drop(sensors, carrying_box, detected_color):
         return False
 
     return _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
+
 # =============================================================================
 #  Main loop (Don't Edit this)
 # =============================================================================
@@ -336,14 +267,15 @@ def main():
              #   if color is not None:
                 #    detected_color = color
                 #    print(f"Color detected: {color!r}")
+            
             if detected_color is None and not carrying_box:
                p = last_sensors.get('proximity', 1.0)
                near_box = 0.0 < p < PICK_PROXIMITY_THRESHOLD
                if near_box:
                  color = detect_color(last_sensors)
-               if color is not None:
-                 detected_color = color
-                 print(f"Color detected: {color!r}")
+                 if color is not None:
+                   detected_color = color
+                   print(f"Color detected: {color!r}")
 
 
             # --- Pick ---
