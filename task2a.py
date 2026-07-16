@@ -74,6 +74,9 @@ PICK_TRY_FRAMES = 1          # one PICK command per approach window
 MAX_PICK_ATTEMPTS = 3        # attempt windows before backing off and retrying approach
 BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
 ERROR_SMOOTH_ALPHA = 0.45
+DROP_INHIBIT_FRAMES = 35
+MIN_DROP_TRAVEL_FRAMES = 95
+DROP_AFTER_JUNCTION_FRAMES = 45
 
 # The arena has one branch node after pickup:
 #   red = left branch, blue = straight branch, green = right branch.
@@ -109,6 +112,9 @@ _backoff_until = 0.0
 _junction_count = 0
 _was_at_junction = False
 _branch_committed = False
+_carry_frames = 0
+_frames_after_junction = 0
+_drop_commanded = False
 
 _was_frozen = False  # set True whenever control_loop freezes the robot
 
@@ -150,6 +156,9 @@ def _is_object_close(sensors, threshold):
 def control_loop(sensors):
     global _integral_error, _prev_error, _filtered_error, _last_line_seen_sign
     global _pick_state, _hold_until, _was_frozen, _backoff_until
+
+    if _drop_commanded and not _carrying_box_state:
+        return 0.0, 0.0
 
     # --- Backing off after repeated failed pick attempts ---
     if not _carrying_box_state and time.time() < _backoff_until:
@@ -284,6 +293,9 @@ def should_pick(sensors, carrying_box):
 
     _carrying_box_state = carrying_box
 
+    if _drop_commanded:
+        return False
+
     if carrying_box:
         _pick_state = "done"
         return False
@@ -303,7 +315,7 @@ def should_pick(sensors, carrying_box):
     if _pick_state == "pick_try":
         _pick_timer -= 1
         _hold_until = time.time() + PICK_HOLD_SECONDS
-        _drop_inhibit_timer = 20
+        _drop_inhibit_timer = DROP_INHIBIT_FRAMES
         if _pick_timer <= 0:
             _pick_attempts += 1
             if _pick_attempts >= MAX_PICK_ATTEMPTS:
@@ -321,34 +333,52 @@ def _on_pick_success():
     """Call this (see note in main-loop guidance) to reset attempt state
     and start counting junctions fresh for the drop-by-node logic."""
     global _pick_attempts, _junction_count, _was_at_junction, _branch_committed
+    global _carry_frames, _frames_after_junction, _drop_commanded
     _pick_attempts = 0
     _junction_count = 0
     _was_at_junction = False
     _branch_committed = False
+    _carry_frames = 0
+    _frames_after_junction = 0
+    _drop_commanded = False
 
 
 def should_drop(sensors, carrying_box, detected_color):
     global _carrying_box_state, _detected_color_state, _drop_inhibit_timer
+    global _carry_frames, _frames_after_junction, _drop_commanded
 
     was_carrying = _carrying_box_state
     _carrying_box_state = carrying_box
     if detected_color is not None:
         _detected_color_state = detected_color
 
-    if not carrying_box:
+    if not carrying_box or _drop_commanded:
         return False
 
     if not was_carrying:
         # Just picked up this frame — reset node/attempt tracking.
         _on_pick_success()
 
+    _carry_frames += 1
+    if _branch_committed:
+        _frames_after_junction += 1
+
     if _drop_inhibit_timer > 0:
         _drop_inhibit_timer -= 1
         return False
 
-    # The first junction chooses the branch. Drop only after entering a branch
-    # and reaching the dead-end/drop-zone object there.
-    return _branch_committed and _is_object_close(sensors, DROP_PROXIMITY_THRESHOLD)
+    # Do not use the proximity sensor for drop: after pickup it keeps seeing
+    # the carried box itself. Drop only after the robot has crossed the route
+    # junction and travelled far enough along the selected branch.
+    if (
+        _branch_committed
+        and _carry_frames >= MIN_DROP_TRAVEL_FRAMES
+        and _frames_after_junction >= DROP_AFTER_JUNCTION_FRAMES
+    ):
+        _drop_commanded = True
+        return True
+
+    return False
 
 # =============================================================================
 #  Main loop (Don't Edit this)
