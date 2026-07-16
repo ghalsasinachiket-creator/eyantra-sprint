@@ -73,9 +73,11 @@ PICK_HOLD_SECONDS = 0.35
 PICK_TRY_FRAMES = 1          # one PICK command per approach window
 MAX_PICK_ATTEMPTS = 3        # attempt windows before backing off and retrying approach
 BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
-POST_DROP_COOLDOWN_SECONDS = 1.2  # ignore proximity/color right after a drop
-                                   # so the drop-zone marker's own color isn't
-                                   # mistaken for a new box to pick
+# NOTE: this task spawns one box per run ("the box will be spawned randomly
+# in the pickup zone"). Once it's delivered, the robot never attempts
+# another pick — see _delivery_complete below. If your evaluation actually
+# spawns multiple boxes in one run, tell me and I'll swap this for a
+# distance-travelled check instead of a permanent latch.
 ERROR_SMOOTH_ALPHA = 0.45
 DROP_INHIBIT_FRAMES = 35
 MIN_DROP_TRAVEL_FRAMES = 95
@@ -125,7 +127,9 @@ _carry_frames = 0
 _frames_after_junction = 0
 
 _was_frozen = False  # set True whenever control_loop freezes the robot
-_post_drop_cooldown_until = 0.0
+_delivery_complete = False  # once True, never attempt another pick — this
+                             # is what stops the robot re-reading the drop
+                             # bin's own color as a fresh box to grab
 
 DT = 0.05
 
@@ -264,7 +268,7 @@ def _track_junction(at_junction):
 def detect_color(sensors):
     global _color_hist, _detected_color_state
 
-    if time.time() < _post_drop_cooldown_until:
+    if _delivery_complete:
         return None
 
     r = sensors.get('color_r', 0.0)
@@ -298,25 +302,30 @@ def detect_color(sensors):
 def should_pick(sensors, carrying_box):
     global _carrying_box_state, _pick_state, _pick_timer, _hold_until
     global _drop_inhibit_timer, _pick_attempts, _backoff_until
-    global _detected_color_state, _post_drop_cooldown_until
+    global _detected_color_state, _delivery_complete
 
     # BUGFIX: _detected_color_state was never cleared after a drop, so it
     # kept holding the color of the box we just dropped. Since the robot
     # is still sitting right next to the drop-zone marker (proximity still
     # reads close), should_pick()'s "color already known" gate was true
-    # instantly, triggering a phantom pick attempt on the bin itself —
-    # which then hung waiting on send_pick() with nothing valid to grab.
+    # instantly, triggering repeated phantom pick attempts on the bin
+    # itself — the simulator rejected each one ("cannot be accomplished in
+    # current state"), and that rapid retry loop is what was flooding the
+    # log and eventually breaking the connection.
     just_dropped = _carrying_box_state and not carrying_box
     _carrying_box_state = carrying_box
     if just_dropped:
         _detected_color_state = None
-        _post_drop_cooldown_until = time.time() + POST_DROP_COOLDOWN_SECONDS
+        _delivery_complete = True  # single-box task: never pick again
+
+    if _delivery_complete:
+        return False
 
     if carrying_box:
         _pick_state = "done"
         return False
 
-    if time.time() < _backoff_until or time.time() < _post_drop_cooldown_until:
+    if time.time() < _backoff_until:
         return False
 
     box_seen = (
