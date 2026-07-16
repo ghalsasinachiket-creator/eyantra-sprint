@@ -73,6 +73,9 @@ PICK_HOLD_SECONDS = 0.35
 PICK_TRY_FRAMES = 1          # one PICK command per approach window
 MAX_PICK_ATTEMPTS = 3        # attempt windows before backing off and retrying approach
 BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
+POST_DROP_COOLDOWN_SECONDS = 1.2  # ignore proximity/color right after a drop
+                                   # so the drop-zone marker's own color isn't
+                                   # mistaken for a new box to pick
 ERROR_SMOOTH_ALPHA = 0.45
 DROP_INHIBIT_FRAMES = 35
 MIN_DROP_TRAVEL_FRAMES = 95
@@ -80,12 +83,18 @@ DROP_AFTER_JUNCTION_FRAMES = 45
 
 # The arena has one branch node after pickup:
 #   red = left branch, blue = straight branch, green = right branch.
+#
+# BUGFIX: with this codebase's convention (left = base+correction,
+# right = base-correction), a POSITIVE correction makes the left wheel
+# faster than the right, which physically turns the robot RIGHT — not
+# left. The previous mapping (red: 1, green: -1) had this backwards,
+# which is exactly why a red box was steering into the green arm and
+# vice versa. Negative = turn left (red's arm); positive = turn right
+# (green's arm).
 TURN_BY_COLOR = {
-    # Positive branch bias turns this robot toward the left arm at the node;
-    # negative turns it toward the right arm.
-    "red": 1,
+    "red": -1,
     "blue": 0,
-    "green": -1,
+    "green": 1,
 }
 
 SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
@@ -114,9 +123,9 @@ _was_at_junction = False
 _branch_committed = False
 _carry_frames = 0
 _frames_after_junction = 0
-_drop_commanded = False
 
 _was_frozen = False  # set True whenever control_loop freezes the robot
+_post_drop_cooldown_until = 0.0
 
 DT = 0.05
 
@@ -156,9 +165,6 @@ def _is_object_close(sensors, threshold):
 def control_loop(sensors):
     global _integral_error, _prev_error, _filtered_error, _last_line_seen_sign
     global _pick_state, _hold_until, _was_frozen, _backoff_until
-
-    if _drop_commanded and not _carrying_box_state:
-        return 0.0, 0.0
 
     # --- Backing off after repeated failed pick attempts ---
     if not _carrying_box_state and time.time() < _backoff_until:
@@ -258,6 +264,9 @@ def _track_junction(at_junction):
 def detect_color(sensors):
     global _color_hist, _detected_color_state
 
+    if time.time() < _post_drop_cooldown_until:
+        return None
+
     r = sensors.get('color_r', 0.0)
     g = sensors.get('color_g', 0.0)
     b = sensors.get('color_b', 0.0)
@@ -289,18 +298,25 @@ def detect_color(sensors):
 def should_pick(sensors, carrying_box):
     global _carrying_box_state, _pick_state, _pick_timer, _hold_until
     global _drop_inhibit_timer, _pick_attempts, _backoff_until
-    global _junction_count, _was_at_junction
+    global _detected_color_state, _post_drop_cooldown_until
 
+    # BUGFIX: _detected_color_state was never cleared after a drop, so it
+    # kept holding the color of the box we just dropped. Since the robot
+    # is still sitting right next to the drop-zone marker (proximity still
+    # reads close), should_pick()'s "color already known" gate was true
+    # instantly, triggering a phantom pick attempt on the bin itself —
+    # which then hung waiting on send_pick() with nothing valid to grab.
+    just_dropped = _carrying_box_state and not carrying_box
     _carrying_box_state = carrying_box
-
-    if _drop_commanded:
-        return False
+    if just_dropped:
+        _detected_color_state = None
+        _post_drop_cooldown_until = time.time() + POST_DROP_COOLDOWN_SECONDS
 
     if carrying_box:
         _pick_state = "done"
         return False
 
-    if time.time() < _backoff_until:
+    if time.time() < _backoff_until or time.time() < _post_drop_cooldown_until:
         return False
 
     box_seen = (
@@ -330,29 +346,35 @@ def should_pick(sensors, carrying_box):
 
 
 def _on_pick_success():
-    """Call this (see note in main-loop guidance) to reset attempt state
-    and start counting junctions fresh for the drop-by-node logic."""
+    """Resets attempt/junction state fresh for the newly picked box."""
     global _pick_attempts, _junction_count, _was_at_junction, _branch_committed
-    global _carry_frames, _frames_after_junction, _drop_commanded
+    global _carry_frames, _frames_after_junction
     _pick_attempts = 0
     _junction_count = 0
     _was_at_junction = False
     _branch_committed = False
     _carry_frames = 0
     _frames_after_junction = 0
-    _drop_commanded = False
 
 
 def should_drop(sensors, carrying_box, detected_color):
     global _carrying_box_state, _detected_color_state, _drop_inhibit_timer
-    global _carry_frames, _frames_after_junction, _drop_commanded
+    global _carry_frames, _frames_after_junction
 
     was_carrying = _carrying_box_state
     _carrying_box_state = carrying_box
     if detected_color is not None:
         _detected_color_state = detected_color
 
-    if not carrying_box or _drop_commanded:
+    # BUGFIX: previously also gated on a module-level `_drop_commanded`
+    # latch that only got cleared inside should_pick()'s success path —
+    # but should_pick() itself refused to run once that latch was set,
+    # so after the first successful drop the robot deadlocked forever
+    # (control_loop kept freezing, should_pick kept refusing to pick).
+    # `carrying_box` (passed in fresh from main every frame) is already
+    # enough to prevent a double-drop, so the latch was both redundant
+    # and the actual cause of the freeze.
+    if not carrying_box:
         return False
 
     if not was_carrying:
@@ -370,15 +392,11 @@ def should_drop(sensors, carrying_box, detected_color):
     # Do not use the proximity sensor for drop: after pickup it keeps seeing
     # the carried box itself. Drop only after the robot has crossed the route
     # junction and travelled far enough along the selected branch.
-    if (
+    return (
         _branch_committed
         and _carry_frames >= MIN_DROP_TRAVEL_FRAMES
         and _frames_after_junction >= DROP_AFTER_JUNCTION_FRAMES
-    ):
-        _drop_commanded = True
-        return True
-
-    return False
+    )
 
 # =============================================================================
 #  Main loop (Don't Edit this)
