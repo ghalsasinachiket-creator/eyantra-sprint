@@ -166,9 +166,11 @@ class CoppeliaClient:
                 if line.startswith(f"{prefix}:"):
                     val = line.split(":", 1)[1].strip().lower()
                     return val == "true"
-                # Re-buffer sensor lines so receive_sensor_data can see them
+                # Ignore sensor packets while waiting for a PICK/DROP reply.
+                # Re-buffering here can trap the same S: line in this loop
+                # forever if it arrives before the reply.
                 if line.startswith("S:"):
-                    self.buffer = line + "\n" + self.buffer
+                    continue
         return None
 
     def _check_frequency(self):
