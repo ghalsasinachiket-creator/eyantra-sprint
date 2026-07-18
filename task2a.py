@@ -490,6 +490,7 @@ def control_loop(sensors):
 
 
 def main():
+    global carrying_started, post_pick_cycles, junction_taken, turn_cycles_left, straight_cycles_left, turn_extension_used, drop_ready, drop_ready_cycles, junction_confirm_streak, lost_streak, previous_error, integral, target_color
     client = CoppeliaClient(host="127.0.0.1", port=50002)
     client.connect()
     print("Connected to bridge_v2_2a. Running... (Ctrl+C to stop)")
