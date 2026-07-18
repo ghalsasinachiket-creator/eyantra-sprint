@@ -2,6 +2,11 @@ import time
 
 from connector import CoppeliaClient
 
+DEBUG = False
+LOG_EVERY_N = 25
+SLEEP_BETWEEN_CYCLES = 0.02
+PICK_DROP_REPLY_HALT = True
+
 
 SENSOR_ORDER = [
     "left_corner",
@@ -158,13 +163,14 @@ def detect_color(sensors):
 
     color = dominant_color(sensors)
 
-    print(
-        f"Box RGB: "
-        f"R={sensors['color_r']:.3f}, "
-        f"G={sensors['color_g']:.3f}, "
-        f"B={sensors['color_b']:.3f} "
-        f"-> {color}"
-    )
+    if DEBUG:
+        print(
+            f"Box RGB: "
+            f"R={sensors['color_r']:.3f}, "
+            f"G={sensors['color_g']:.3f}, "
+            f"B={sensors['color_b']:.3f} "
+            f"-> {color}"
+        )
 
     if color is not None:
         target_color = color
@@ -236,13 +242,14 @@ def _should_drop_proximity(sensors):
 
     global _drop_debug_count
     _drop_debug_count += 1
-    if _drop_debug_count % 20 == 0:
+    if DEBUG and _drop_debug_count % 20 == 0:
         print(f"[drop_ready] cycles={drop_ready_cycles}, "
               f"proximity={proximity:.3f} (need < {DROP_DISTANCE})")
 
     if proximity < DROP_DISTANCE:
-        print(f"Final marker detected: proximity={proximity:.3f}, "
-              f"drop_ready_cycles={drop_ready_cycles}")
+        if DEBUG:
+            print(f"Final marker detected: proximity={proximity:.3f}, "
+                  f"drop_ready_cycles={drop_ready_cycles}")
         return True
 
     return False
@@ -254,7 +261,7 @@ def _should_drop_line_end(sensors):
     Proximity is not used at all here -- proven unreliable above.
     """
 
-    if drop_ready_cycles % 10 == 0:
+    if DEBUG and drop_ready_cycles % 10 == 0:
         print(f"[buffer wait] cycles={drop_ready_cycles}, "
               f"proximity={sensors.get('proximity', 1.0):.3f} (unused for this color)")
 
@@ -265,9 +272,10 @@ def _should_drop_line_end(sensors):
     line_lost_now = features["total"] < 0.08 or features["max_deviation"] < 0.08
 
     if line_lost_now:
-        print(f"Line end reached after {drop_ready_cycles} post-turn cycles "
-              f"(total={features['total']:.3f}, max_dev={features['max_deviation']:.3f}). "
-              f"Dropping here.")
+        if DEBUG:
+            print(f"Line end reached after {drop_ready_cycles} post-turn cycles "
+                  f"(total={features['total']:.3f}, max_dev={features['max_deviation']:.3f}). "
+                  f"Dropping here.")
         return True
 
     return False
@@ -293,7 +301,7 @@ def control_loop(sensors):
     if carrying_started:
         post_pick_cycles += 1
 
-        if post_pick_cycles % 15 == 0 and not junction_taken:
+        if DEBUG and post_pick_cycles % 15 == 0 and not junction_taken:
             debug_f = line_features(sensors)
             print(f"[post_pick] cycle={post_pick_cycles}, "
                   f"active_count={debug_f['active_count']}, "
@@ -334,11 +342,12 @@ def control_loop(sensors):
                 turn_cycles_left = TURN_CYCLES
                 straight_cycles_left = 0
 
-            debug_features = line_features(sensors)
-            print(f"Junction detected. Taking {target_color} route. "
-                  f"active_count={debug_features['active_count']}, "
-                  f"total={debug_features['total']:.3f}, "
-                  f"values={[sensors.get(n, 0.0) for n in SENSOR_ORDER]}")
+            if DEBUG:
+                debug_features = line_features(sensors)
+                print(f"Junction detected. Taking {target_color} route. "
+                      f"active_count={debug_features['active_count']}, "
+                      f"total={debug_features['total']:.3f}, "
+                      f"values={[sensors.get(n, 0.0) for n in SENSOR_ORDER]}")
 
         elif junction_confirm_streak > 0:
             # Mid-confirmation: we're inside (or just entering) the
@@ -346,8 +355,9 @@ def control_loop(sensors):
             # Slow to a crawl instead of running full-speed PID, so we
             # don't sail past the (brief) diffuse zone and out into the
             # open gap before we've had a chance to commit to the turn.
-            print(f"[confirming junction] streak={junction_confirm_streak}, "
-                  f"total={line_features(sensors)['total']:.3f}")
+            if DEBUG:
+                print(f"[confirming junction] streak={junction_confirm_streak}, "
+                      f"total={line_features(sensors)['total']:.3f}")
             return 0.5, 0.5
 
     # -------------------------------------------------------------
@@ -364,13 +374,13 @@ def control_loop(sensors):
     #   green -> right turn (green branch is on the right of the map)
     # -------------------------------------------------------------
     if junction_taken and turn_cycles_left > 0:
-        if turn_cycles_left == TURN_CYCLES:
+        if turn_cycles_left == TURN_CYCLES and DEBUG:
             print(f"Starting {target_color} turn. cycles={TURN_CYCLES}, "
                   f"position={line_features(sensors)['position']:.3f}")
 
         turn_cycles_left -= 1
 
-        if turn_cycles_left == 0:
+        if turn_cycles_left == 0 and DEBUG:
             print(f"Turn cycles finished. position={line_features(sensors)['position']:.3f}")
 
         if target_color == "red":
@@ -408,7 +418,8 @@ def control_loop(sensors):
 
     if junction_taken and turn_cycles_left == 0 and straight_cycles_left == 0:
         if not drop_ready:
-            print("Turn complete. drop_ready=True, resuming PID toward marker.")
+            if DEBUG:
+                print("Turn complete. drop_ready=True, resuming PID toward marker.")
             drop_ready_cycles = 0
         drop_ready = True
 
@@ -425,9 +436,11 @@ def control_loop(sensors):
     if line_lost:
         lost_streak += 1
 
-        if lost_streak == 1 and junction_taken:
-            print(f"Line lost after junction. target={target_color}, "
-                  f"turn_cycles_left={turn_cycles_left}, drop_ready={drop_ready}")
+        if lost_streak == 1 and junction_taken and DEBUG:
+            print(
+                f"Line lost after junction. target={target_color}, "
+                f"turn_cycles_left={turn_cycles_left}, drop_ready={drop_ready}"
+            )
 
         if drop_ready:
             # We already know we're on the right branch, close to the
@@ -498,54 +511,81 @@ def main():
     carrying_box = False
     detected_color = None
 
+    pick_in_progress = False
+    drop_in_progress = False
+    last_log_cycle = 0
+    cycle = 0
+
     try:
         while True:
+            cycle += 1
+
+            # When waiting for PICK/DROP replies, DO NOT read sensors or
+            # continue the control loop (prevents socket/reentrant issues).
+            if pick_in_progress or drop_in_progress:
+                time.sleep(SLEEP_BETWEEN_CYCLES)
+                continue
+
             # Use only new sensor packets.
             sensors = client.receive_sensor_data()
-
             if sensors is None:
-                time.sleep(0.01)
+                time.sleep(SLEEP_BETWEEN_CYCLES)
                 continue
 
             # Detect package colour.
-            if not carrying_box and detected_color is None:
+            if (not carrying_box) and detected_color is None:
                 color = detect_color(sensors)
-
                 if color is not None:
                     detected_color = color
-                    print(f"Target color set to: {detected_color}")
+                    if DEBUG:
+                        print(f"Target color set to: {detected_color}")
 
-            # Pick package.
-            if not carrying_box and should_pick(sensors, carrying_box):
+            # Pick package (stop motors first).
+            if (not carrying_box) and (detected_color is not None) and should_pick(sensors, carrying_box):
                 client.send_motor_command(0.0, 0.0)
-
-                success = client.send_pick()
-                print(f"PICK attempted - success={success}")
+                pick_in_progress = True
+                try:
+                    success = client.send_pick()
+                finally:
+                    pick_in_progress = False
 
                 if success:
                     carrying_box = True
-                    print(f"Carrying {detected_color} box.")
+                    if DEBUG:
+                        print(f"Carrying {detected_color} box.")
+                # If pick failed, keep searching (do not call control_loop this cycle).
+                time.sleep(SLEEP_BETWEEN_CYCLES)
+                continue
 
-            # Drop package.
-            if carrying_box and should_drop(
-                sensors,
-                carrying_box,
-                detected_color
-            ):
+            # Drop package (stop motors first).
+            if carrying_box and should_drop(sensors, carrying_box, detected_color):
                 client.send_motor_command(0.0, 0.0)
-
-                success = client.send_drop()
-                print(f"DROP attempted - success={success}")
+                drop_in_progress = True
+                try:
+                    success = client.send_drop()
+                finally:
+                    drop_in_progress = False
 
                 if success:
-                    print("Task completed.")
+                    if DEBUG:
+                        print("Task completed.")
                     break
 
-                print("DROP rejected. Continuing on the line.")
+                if DEBUG:
+                    print("DROP rejected. Continuing on the line.")
+                time.sleep(SLEEP_BETWEEN_CYCLES)
+                continue
 
             # Drive robot.
             left, right = control_loop(sensors)
             client.send_motor_command(left, right)
+
+            if DEBUG and cycle - last_log_cycle >= LOG_EVERY_N:
+                last_log_cycle = cycle
+                f = line_features(sensors)
+                print(f"[drive] cycle={cycle} pos={f['position']:.3f} total={f['total']:.3f}")
+
+            time.sleep(SLEEP_BETWEEN_CYCLES)
 
     except KeyboardInterrupt:
         print("\nStopping...")

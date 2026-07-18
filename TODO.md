@@ -1,0 +1,7 @@
+- [ ] Update task2a.py:
+  - [ ] Add DEBUG + print throttling (remove high-frequency RGB prints)
+  - [ ] Prevent simultaneous socket reads/writes by not calling receive_sensor_data / control_loop while waiting for PICK/DROP replies
+  - [ ] Add small time.sleep to avoid sending commands faster than bridge reads
+  - [ ] Ensure motor commands are stopped during pick/drop attempts and that we return/continue correctly after each attempt
+- [ ] Run quick sanity test (start task2a.py and confirm it proceeds to pick & drop without freezing)
+- [ ] If still freezing, inspect additional connector/client interaction and apply further throttling/timeout
