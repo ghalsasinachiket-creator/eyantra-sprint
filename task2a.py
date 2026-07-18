@@ -46,6 +46,7 @@ STRAIGHT_CYCLES = 8
 JUNCTION_MIN_CYCLES = 40
 OFF_CENTER_DEVIATION = 0.12  # how far from centre counts as "clearly on the branch"
 JUNCTION_CONFIRM_CYCLES = 3  # consecutive matching frames needed before committing to a turn
+JUNCTION_MAX_CYCLES_AFTER_MIN = 120  # safety fallback: force turn if confirmation never locks
 
 # Real debug data: normal on-line total ~0.80, fully-lost total ~0.00,
 # the actual junction reads a diffuse ~0.28. Band chosen with margin
@@ -330,38 +331,52 @@ def control_loop(sensors):
         and not junction_taken
         and post_pick_cycles >= JUNCTION_MIN_CYCLES
     ):
-        if junction_detected(sensors):
-            junction_confirm_streak += 1
-        else:
-            junction_confirm_streak = 0
-
-        if junction_confirm_streak >= JUNCTION_CONFIRM_CYCLES:
+        # Junction detection can be noisy; if we never lock, force the
+        # turn after a reasonable window to avoid "freezing" in recovery.
+        if post_pick_cycles > (JUNCTION_MIN_CYCLES + JUNCTION_MAX_CYCLES_AFTER_MIN):
             junction_taken = True
-
             if target_color == "blue":
                 turn_cycles_left = 0
                 straight_cycles_left = STRAIGHT_CYCLES
             else:
                 turn_cycles_left = TURN_CYCLES
                 straight_cycles_left = 0
-
             if DEBUG:
-                debug_features = line_features(sensors)
-                print(f"Junction detected. Taking {target_color} route. "
-                      f"active_count={debug_features['active_count']}, "
-                      f"total={debug_features['total']:.3f}, "
-                      f"values={[sensors.get(n, 0.0) for n in SENSOR_ORDER]}")
+                print(f"[junction timeout] forcing {target_color} route after "
+                      f"post_pick_cycles={post_pick_cycles}.")
+        else:
+            if junction_detected(sensors):
+                junction_confirm_streak += 1
+            else:
+                junction_confirm_streak = 0
 
-        elif junction_confirm_streak > 0:
-            # Mid-confirmation: we're inside (or just entering) the
-            # diffuse zone but haven't hit JUNCTION_CONFIRM_CYCLES yet.
-            # Slow to a crawl instead of running full-speed PID, so we
-            # don't sail past the (brief) diffuse zone and out into the
-            # open gap before we've had a chance to commit to the turn.
-            if DEBUG:
-                print(f"[confirming junction] streak={junction_confirm_streak}, "
-                      f"total={line_features(sensors)['total']:.3f}")
-            return 0.5, 0.5
+            if junction_confirm_streak >= JUNCTION_CONFIRM_CYCLES:
+                junction_taken = True
+
+                if target_color == "blue":
+                    turn_cycles_left = 0
+                    straight_cycles_left = STRAIGHT_CYCLES
+                else:
+                    turn_cycles_left = TURN_CYCLES
+                    straight_cycles_left = 0
+
+                if DEBUG:
+                    debug_features = line_features(sensors)
+                    print(f"Junction detected. Taking {target_color} route. "
+                          f"active_count={debug_features['active_count']}, "
+                          f"total={debug_features['total']:.3f}, "
+                          f"values={[sensors.get(n, 0.0) for n in SENSOR_ORDER]}")
+
+            elif junction_confirm_streak > 0:
+                # Mid-confirmation: we're inside (or just entering) the
+                # diffuse zone but haven't hit JUNCTION_CONFIRM_CYCLES yet.
+                # Slow to a crawl instead of running full-speed PID, so we
+                # don't sail past the (brief) diffuse zone and out into the
+                # open gap before we've had a chance to commit to the turn.
+                if DEBUG:
+                    print(f"[confirming junction] streak={junction_confirm_streak}, "
+                          f"total={line_features(sensors)['total']:.3f}")
+                return 0.5, 0.5
 
     # -------------------------------------------------------------
     # Blue: force straight through the trident so side-branch lines
