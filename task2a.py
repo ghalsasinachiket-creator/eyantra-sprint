@@ -1,478 +1,562 @@
-"""
-===================================================
-  eLSI Sprint 1 - Task 2A : PID Line Following + Pick & Place
-===================================================
-
-Participant template.
-
-HOW TO RUN
-  1. Open the Task 2A scene in CoppeliaSim.
-  2. Start the bridge:   python3 bridge_v1_2a.py --eval
-  3. Run this file:      python3 task2a.py
-
-WHAT YOU IMPLEMENT
-  control_loop()  — PID controller that returns (left_speed, right_speed).
-  detect_color()  — identify the box color from RGB sensor values.
-  should_pick()   — decide when to stop and pick the box.
-  should_drop()   — decide when to drop the carried box.
-
-Everything else (connecting, receiving sensors, sending motor/pick/drop
-commands) is handled by CoppeliaClient.
-Don't edit this file except the marked TODO sections.
-You may add helper functions.
-
-SENSOR PROTOCOL  (from 2a_wrapper.py):
-  Line sensors:  'left_corner', 'left', 'middle', 'right', 'right_corner'
-                  — float [0.0, 1.0];  higher = line detected.
-  Proximity:     'proximity'  — metres to nearest object; 1.0 = nothing in range.
-  Color sensor:  'color_r', 'color_g', 'color_b'  — float [0.0, 1.0].
-
-TASK FLOW
-  1. Robot drives the line following the PID controller.
-  2. When the robot is close to the box (proximity low), read the color,
-     stop, and send a PICK command.
-  3. Robot carries the box and continues following the line.
-  4. At the correct drop zone, send a DROP command.
-
-Team ID: [ 403 ]
-"""
-
 import time
 
 from connector import CoppeliaClient
 
-# The five line sensors, ordered left → right across the robot ([0.0, 1.0]).
-SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
+
+SENSOR_ORDER = [
+    "left_corner",
+    "left",
+    "middle",
+    "right",
+    "right_corner",
+]
+
+WEIGHTS = [-2, -1, 0, 1, 2]
+
+# PID values from your successful Task 1A controller.
+KP = 0.65
+KI = 0.00
+KD = 0.15
+
+PICK_DISTANCE = 0.14
+DROP_DISTANCE = 0.19
+MIN_DROP_READY_CYCLES_STRAIGHT = 15  # blue: short straight run, proximity-based
+
+# Red/green: proximity is unusable (proven flat/constant regardless of
+# distance travelled). Instead we wait for the line to genuinely end,
+# but only after this many post-turn cycles -- otherwise a brief
+# mid-turn blip could fire it too early. User's own sim observation
+# placed real arrival at ~105-120 cycles, so require most of that
+# before trusting a "line lost" as the real end rather than a blip.
+MIN_TRAVEL_BEFORE_LINE_END_DROP = 100
+
+# Sharp turn at the junction for red/green branches.
+TURN_CYCLES = 14
+MAX_TURN_EXTENSION = 20  # hard cap so a bad turn can't run away forever
+
+# Forced straight-through for blue, so the trident's side branches
+# don't pull the PID sideways right at the split.
+STRAIGHT_CYCLES = 8
+
+JUNCTION_MIN_CYCLES = 40
+OFF_CENTER_DEVIATION = 0.12  # how far from centre counts as "clearly on the branch"
+JUNCTION_CONFIRM_CYCLES = 3  # consecutive matching frames needed before committing to a turn
+
+# Real debug data: normal on-line total ~0.80, fully-lost total ~0.00,
+# the actual junction reads a diffuse ~0.28. Band chosen with margin
+# on both sides of that observed value.
+DIFFUSE_TOTAL_MIN = 0.08
+DIFFUSE_TOTAL_MAX = 0.55
 
 
-# =============================================================================
-#  TODO (participants): implement the four functions below.
-#  You may add helper functions anywhere in this section.
-# =============================================================================
+previous_error = 0.0
+integral = 0.0
+lost_streak = 0
+last_correction = 0.0
+last_base_speed = 1.5
 
-# ---- Tunable constants -----------------------------------------------------
-BASE_SPEED = 1.6
-APPROACH_SPEED = 0.8
-KP = 3.0
-KI = 0.0
-KD = 0.65
-MAX_CORRECTION = 1.15
-MAX_SPEED = 2.4
-BRANCH_STEER = 0.42
-BRANCH_MAX_CORRECTION = 0.95
-BRANCH_BASE_SPEED = 1.15
-MIN_CARRY_SPEED = 0.20
+target_color = None
+carrying_started = False
+post_pick_cycles = 0
 
-PICK_PROXIMITY_THRESHOLD = 0.22
-DROP_PROXIMITY_THRESHOLD = 0.16
-COLOR_CONFIDENCE_THRESHOLD = 0.05
-LINE_THRESHOLD = 0.03
-
-# stop-at-box behavior
-PICK_HOLD_SECONDS = 0.35
-PICK_TRY_FRAMES = 1          # one PICK command per approach window
-MAX_PICK_ATTEMPTS = 3        # attempt windows before backing off and retrying approach
-BACKOFF_SECONDS = 0.6        # how long to reverse when a pick keeps failing
-# NOTE: this task spawns one box per run ("the box will be spawned randomly
-# in the pickup zone"). Once it's delivered, the robot never attempts
-# another pick — see _delivery_complete below. If your evaluation actually
-# spawns multiple boxes in one run, tell me and I'll swap this for a
-# distance-travelled check instead of a permanent latch.
-ERROR_SMOOTH_ALPHA = 0.45
-DROP_INHIBIT_FRAMES = 35
-MIN_DROP_TRAVEL_FRAMES = 95
-DROP_AFTER_JUNCTION_FRAMES = 45
-
-# The arena has one branch node after pickup:
-#   red = left branch, blue = straight branch, green = right branch.
-#
-# BUGFIX: with this codebase's convention (left = base+correction,
-# right = base-correction), a POSITIVE correction makes the left wheel
-# faster than the right, which physically turns the robot RIGHT — not
-# left. The previous mapping (red: 1, green: -1) had this backwards,
-# which is exactly why a red box was steering into the green arm and
-# vice versa. Negative = turn left (red's arm); positive = turn right
-# (green's arm).
-TURN_BY_COLOR = {
-    "red": -1,
-    "blue": 0,
-    "green": 1,
-}
-
-SENSOR_WEIGHTS = [-2.0, -1.0, 0.0, 1.0, 2.0]
-
-# ---- Internal state --------------------------------------------------------
-_integral_error = 0.0
-_prev_error = 0.0
-_filtered_error = 0.0
-_last_line_seen_sign = 1.0
-
-_carrying_box_state = False
-_detected_color_state = None
-_color_hist = []
-
-# pickup state machine: search -> settle -> pick_try -> backoff
-_pick_state = "search"
-_pick_timer = 0
-_hold_until = 0.0
-_drop_inhibit_timer = 0
-_pick_attempts = 0
-_backoff_until = 0.0
-
-# junction tracking while carrying
-_junction_count = 0
-_was_at_junction = False
-_branch_committed = False
-_carry_frames = 0
-_frames_after_junction = 0
-
-_was_frozen = False  # set True whenever control_loop freezes the robot
-_delivery_complete = False  # once True, never attempt another pick — this
-                             # is what stops the robot re-reading the drop
-                             # bin's own color as a fresh box to grab
-
-DT = 0.05
+junction_taken = False
+turn_cycles_left = 0
+straight_cycles_left = 0
+turn_extension_used = 0
+drop_ready = False
+drop_ready_cycles = 0
+_drop_debug_count = 0
+junction_confirm_streak = 0
 
 
-def _line_error(sensors):
-    vals = [sensors.get(key, 0.0) for key in SENSOR_ORDER]
-    lo = min(vals)
-    hi = max(vals)
-    contrast = hi - lo
-    if contrast < LINE_THRESHOLD:
-        return None
+def line_features(sensors):
+    """Find the line from the local difference between the five sensors."""
 
-    bright_strengths = [(v - lo) / contrast for v in vals]
-    dark_strengths = [(hi - v) / contrast for v in vals]
+    values = [sensors.get(name, 0.0) for name in SENSOR_ORDER]
 
-    # Some scenes report "line = high"; others effectively report the dark
-    # track as the strongest signal. Pick the narrower pattern each frame.
-    strengths = (
-        bright_strengths
-        if sum(bright_strengths) <= sum(dark_strengths)
-        else dark_strengths
+    baseline = sorted(values)[2]
+    deviations = [abs(value - baseline) for value in values]
+
+    total = sum(deviations)
+    max_deviation = max(deviations)
+
+    weighted_sum = sum(
+        deviation * weight
+        for deviation, weight in zip(deviations, WEIGHTS)
     )
 
-    total_signal = sum(strengths)
-    if total_signal < LINE_THRESHOLD:
-        return None
+    position = weighted_sum / total if total > 0.0001 else 0.0
 
-    return sum(w * v for w, v in zip(SENSOR_WEIGHTS, strengths)) / total_signal
-
-
-def _is_object_close(sensors, threshold):
-    # Protocol: proximity is distance in metres; 1.0 means no object
-    p = sensors.get('proximity', 1.0)
-    return 0.0 < p < threshold
-
-
-def control_loop(sensors):
-    global _integral_error, _prev_error, _filtered_error, _last_line_seen_sign
-    global _pick_state, _hold_until, _was_frozen, _backoff_until
-
-    # --- Backing off after repeated failed pick attempts ---
-    if not _carrying_box_state and time.time() < _backoff_until:
-        _was_frozen = True
-        return -1.0, -1.0  # reverse slightly to re-approach
-
-    # --- Freeze while attempting a pick ---
-    if (
-        not _carrying_box_state
-        and (_pick_state == "pick_try" or time.time() < _hold_until)
-    ):
-        _was_frozen = True  # BUGFIX: this flag was declared but never set,
-        return 0.0, 0.0     # which let stale PID error terms cause a swerve
-                             # the instant the robot resumed after a pick.
-
-    error = _line_error(sensors)
-
-    if error is None:
-        search_speed = 0.55
-        left = -search_speed * _last_line_seen_sign
-        right = search_speed * _last_line_seen_sign
-        return left, right
-
-    if _was_frozen:
-        _prev_error = error       # kills the derivative kick this frame
-        _filtered_error = error
-        _integral_error = 0.0     # don't carry pre-pick/backoff windup into
-        _was_frozen = False       # the resumed drive
-
-    _filtered_error = (
-        (1.0 - ERROR_SMOOTH_ALPHA) * _filtered_error
-        + ERROR_SMOOTH_ALPHA * error
+    active_count = sum(
+        deviation > 0.10
+        for deviation in deviations
     )
-    error = _filtered_error
 
-    if abs(error) > 1e-6:
-        _last_line_seen_sign = 1.0 if error > 0 else -1.0
+    uniform_surface = (max(values) - min(values)) < 0.06
 
-    line_vals = [sensors.get(key, 0.0) for key in SENSOR_ORDER]
-    at_junction = sum(1 for v in line_vals if v > 0.35) >= 4
-
-    branch_turn = 0
-    if at_junction and _carrying_box_state and not _branch_committed:
-        branch_turn = TURN_BY_COLOR.get(_detected_color_state, 0)
-
-    _track_junction(at_junction)
-
-    _integral_error += error * DT
-    derivative = (error - _prev_error) / DT
-    _prev_error = error
-
-    correction = KP * error + KI * _integral_error + KD * derivative
-    correction += BRANCH_STEER * branch_turn
-
-    correction_limit = BRANCH_MAX_CORRECTION if branch_turn else MAX_CORRECTION
-    correction = max(-correction_limit, min(correction_limit, correction))
-
-    color_visible = max(
-        sensors.get('color_r', 0.0),
-        sensors.get('color_g', 0.0),
-        sensors.get('color_b', 0.0),
-    ) > COLOR_CONFIDENCE_THRESHOLD
-    base_speed = BRANCH_BASE_SPEED if branch_turn else BASE_SPEED
-    if not _carrying_box_state and color_visible:
-        base_speed = APPROACH_SPEED
-
-    left = base_speed + correction
-    right = base_speed - correction
-
-    if _carrying_box_state:
-        left = max(MIN_CARRY_SPEED, left)
-        right = max(MIN_CARRY_SPEED, right)
-
-    left = max(-MAX_SPEED, min(MAX_SPEED, left))
-    right = max(-MAX_SPEED, min(MAX_SPEED, right))
-    return left, right
+    return {
+        "total": total,
+        "max_deviation": max_deviation,
+        "position": position,
+        "active_count": active_count,
+        "uniform_surface": uniform_surface,
+    }
 
 
-def _track_junction(at_junction):
-    """Count the first branch node and commit only after leaving it.
+def junction_detected(sensors):
+    """Detect the centre three-way intersection.
 
-    Red/green need a steering bias for several frames while the robot is on
-    the node. If we commit on the rising edge, the bias disappears instantly
-    and the robot continues on the default blue/straight route.
+    Real debug data showed normal single-line tracking ALWAYS produces
+    active_count == 1 (only the middle sensor reads "on line"; the rest
+    read the off-line background value). active_count never reaches 2
+    or 3 during ordinary tracking, so any threshold >= 2 on active_count
+    alone was unreachable — that's why junction detection kept failing.
+
+    The real junction instead showed up as a DIFFUSE reading: all five
+    sensors landing on moderate, blended values instead of the sharp
+    binary on/off pattern (e.g. 0.735, 0.718, 0.664, 0.636, 0.533).
+    That gives a "total" deviation sum in a mid-range band -- clearly
+    below normal on-line total (~0.80) but clearly above fully-lost
+    total (~0.00). That mid-range band is what we now key off.
     """
-    global _junction_count, _was_at_junction, _branch_committed
-    if not _carrying_box_state:
-        _was_at_junction = at_junction
-        return
-    if at_junction and not _was_at_junction:
-        _junction_count += 1
-    if not at_junction and _was_at_junction and _junction_count >= 1:
-        _branch_committed = True
-    _was_at_junction = at_junction
+
+    features = line_features(sensors)
+
+    diffuse_transition = (
+        DIFFUSE_TOTAL_MIN < features["total"] < DIFFUSE_TOTAL_MAX
+    )
+
+    return features["active_count"] >= 2 or diffuse_transition
+
+
+def dominant_color(sensors):
+    """Return red, green, blue, or None."""
+
+    r = sensors.get("color_r", 0.0)
+    g = sensors.get("color_g", 0.0)
+    b = sensors.get("color_b", 0.0)
+
+    colors = {
+        "red": r,
+        "green": g,
+        "blue": b,
+    }
+
+    if max(colors.values()) < 0.02:
+        return None
+
+    return max(colors, key=colors.get)
 
 
 def detect_color(sensors):
-    global _color_hist, _detected_color_state
+    """Read the box colour while the package is near the robot."""
 
-    if _delivery_complete:
+    global target_color
+
+    if sensors.get("proximity", 1.0) > 0.25:
         return None
 
-    r = sensors.get('color_r', 0.0)
-    g = sensors.get('color_g', 0.0)
-    b = sensors.get('color_b', 0.0)
+    color = dominant_color(sensors)
 
-    if max(r, g, b) < COLOR_CONFIDENCE_THRESHOLD:
-        return None
+    print(
+        f"Box RGB: "
+        f"R={sensors['color_r']:.3f}, "
+        f"G={sensors['color_g']:.3f}, "
+        f"B={sensors['color_b']:.3f} "
+        f"-> {color}"
+    )
 
-    _color_hist.append((r, g, b))
-    if len(_color_hist) > 8:
-        _color_hist.pop(0)
+    if color is not None:
+        target_color = color
 
-    ar = sum(x[0] for x in _color_hist) / len(_color_hist)
-    ag = sum(x[1] for x in _color_hist) / len(_color_hist)
-    ab = sum(x[2] for x in _color_hist) / len(_color_hist)
-
-    vals = {"red": ar, "green": ag, "blue": ab}
-    best = max(vals, key=vals.get)
-    m = vals[best]
-    second = sorted(vals.values(), reverse=True)[1]
-
-    if m < COLOR_CONFIDENCE_THRESHOLD:
-        return None
-    if (m - second) < 0.02:
-        return None
-    _detected_color_state = best
-    return best
+    return color
 
 
 def should_pick(sensors, carrying_box):
-    global _carrying_box_state, _pick_state, _pick_timer, _hold_until
-    global _drop_inhibit_timer, _pick_attempts, _backoff_until
-    global _detected_color_state, _delivery_complete
-
-    # BUGFIX: _detected_color_state was never cleared after a drop, so it
-    # kept holding the color of the box we just dropped. Since the robot
-    # is still sitting right next to the drop-zone marker (proximity still
-    # reads close), should_pick()'s "color already known" gate was true
-    # instantly, triggering repeated phantom pick attempts on the bin
-    # itself — the simulator rejected each one ("cannot be accomplished in
-    # current state"), and that rapid retry loop is what was flooding the
-    # log and eventually breaking the connection.
-    just_dropped = _carrying_box_state and not carrying_box
-    _carrying_box_state = carrying_box
-    if just_dropped:
-        _detected_color_state = None
-        _delivery_complete = True  # single-box task: never pick again
-
-    if _delivery_complete:
-        return False
+    """Pick only after box colour is known."""
 
     if carrying_box:
-        _pick_state = "done"
         return False
 
-    if time.time() < _backoff_until:
+    if target_color is None:
         return False
 
-    box_seen = (
-        _is_object_close(sensors, PICK_PROXIMITY_THRESHOLD)
-        and _detected_color_state is not None
-    )
-    if box_seen and _pick_state == "search":
-        _pick_state = "pick_try"
-        _pick_timer = PICK_TRY_FRAMES
-        _hold_until = time.time() + PICK_HOLD_SECONDS
+    return sensors.get("proximity", 1.0) < PICK_DISTANCE
 
-    if _pick_state == "pick_try":
-        _pick_timer -= 1
-        _hold_until = time.time() + PICK_HOLD_SECONDS
-        _drop_inhibit_timer = DROP_INHIBIT_FRAMES
-        if _pick_timer <= 0:
-            _pick_attempts += 1
-            if _pick_attempts >= MAX_PICK_ATTEMPTS:
-                # Repeated failed attempts: back off and re-approach instead
-                # of looping search<->pick_try forever in place.
-                _pick_attempts = 0
-                _backoff_until = time.time() + BACKOFF_SECONDS
-            _pick_state = "search"
+
+def should_drop(sensors, carrying_box, detected_color):
+    """
+    Drop only after the chosen branch is entered and the robot has
+    genuinely reached the end of it.
+
+    Real debug data proved proximity is unusable for red/green: it sat
+    at a perfectly constant ~0.123 for 200+ cycles no matter how far
+    the robot travelled along the curve -- almost certainly because
+    the sensor is picking up the curve's own central post at a fixed
+    radius, not the actual end-of-branch marker. No proximity
+    threshold can ever distinguish "cruising the curve" from "arrived"
+    there.
+
+    What DOES mark arrival for red/green: the drawn trajectory line
+    physically ends at the bracket, so "the line is genuinely lost
+    after a solid stretch of post-turn travel" is the real signal --
+    confirmed by the user watching the sim (drop should happen right
+    around when the line disappears for good, ~cycle 105-120).
+
+    Blue keeps the original proximity-based check since that one
+    already works correctly.
+    """
+
+    global carrying_started
+    global drop_ready_cycles
+
+    if not carrying_box:
+        return False
+
+    carrying_started = True
+
+    if not drop_ready:
+        return False
+
+    drop_ready_cycles += 1
+
+    if target_color == "blue":
+        return _should_drop_proximity(sensors)
+
+    return _should_drop_line_end(sensors)
+
+
+def _should_drop_proximity(sensors):
+    """Blue: proximity-based drop, unchanged from the working version."""
+
+    if drop_ready_cycles < MIN_DROP_READY_CYCLES_STRAIGHT:
+        return False
+
+    proximity = sensors.get("proximity", 1.0)
+
+    global _drop_debug_count
+    _drop_debug_count += 1
+    if _drop_debug_count % 20 == 0:
+        print(f"[drop_ready] cycles={drop_ready_cycles}, "
+              f"proximity={proximity:.3f} (need < {DROP_DISTANCE})")
+
+    if proximity < DROP_DISTANCE:
+        print(f"Final marker detected: proximity={proximity:.3f}, "
+              f"drop_ready_cycles={drop_ready_cycles}")
         return True
 
     return False
 
 
-def _on_pick_success():
-    """Resets attempt/junction state fresh for the newly picked box."""
-    global _pick_attempts, _junction_count, _was_at_junction, _branch_committed
-    global _carry_frames, _frames_after_junction
-    _pick_attempts = 0
-    _junction_count = 0
-    _was_at_junction = False
-    _branch_committed = False
-    _carry_frames = 0
-    _frames_after_junction = 0
+def _should_drop_line_end(sensors):
+    """Red/green: drop when the line is genuinely lost after enough
+    post-turn travel to have plausibly reached the end of the branch.
+    Proximity is not used at all here -- proven unreliable above.
+    """
 
+    if drop_ready_cycles % 10 == 0:
+        print(f"[buffer wait] cycles={drop_ready_cycles}, "
+              f"proximity={sensors.get('proximity', 1.0):.3f} (unused for this color)")
 
-def should_drop(sensors, carrying_box, detected_color):
-    global _carrying_box_state, _detected_color_state, _drop_inhibit_timer
-    global _carry_frames, _frames_after_junction
-
-    was_carrying = _carrying_box_state
-    _carrying_box_state = carrying_box
-    if detected_color is not None:
-        _detected_color_state = detected_color
-
-    # BUGFIX: previously also gated on a module-level `_drop_commanded`
-    # latch that only got cleared inside should_pick()'s success path —
-    # but should_pick() itself refused to run once that latch was set,
-    # so after the first successful drop the robot deadlocked forever
-    # (control_loop kept freezing, should_pick kept refusing to pick).
-    # `carrying_box` (passed in fresh from main every frame) is already
-    # enough to prevent a double-drop, so the latch was both redundant
-    # and the actual cause of the freeze.
-    if not carrying_box:
+    if drop_ready_cycles < MIN_TRAVEL_BEFORE_LINE_END_DROP:
         return False
 
-    if not was_carrying:
-        # Just picked up this frame — reset node/attempt tracking.
-        _on_pick_success()
+    features = line_features(sensors)
+    line_lost_now = features["total"] < 0.08 or features["max_deviation"] < 0.08
 
-    _carry_frames += 1
-    if _branch_committed:
-        _frames_after_junction += 1
+    if line_lost_now:
+        print(f"Line end reached after {drop_ready_cycles} post-turn cycles "
+              f"(total={features['total']:.3f}, max_dev={features['max_deviation']:.3f}). "
+              f"Dropping here.")
+        return True
 
-    if _drop_inhibit_timer > 0:
-        _drop_inhibit_timer -= 1
-        return False
+    return False
 
-    # Do not use the proximity sensor for drop: after pickup it keeps seeing
-    # the carried box itself. Drop only after the robot has crossed the route
-    # junction and travelled far enough along the selected branch.
-    return (
-        _branch_committed
-        and _carry_frames >= MIN_DROP_TRAVEL_FRAMES
-        and _frames_after_junction >= DROP_AFTER_JUNCTION_FRAMES
+
+def control_loop(sensors):
+    """PID line-following plus red/blue/green branch selection."""
+
+    global previous_error
+    global integral
+    global lost_streak
+    global last_correction
+    global last_base_speed
+    global post_pick_cycles
+    global junction_taken
+    global turn_cycles_left
+    global straight_cycles_left
+    global turn_extension_used
+    global drop_ready
+    global drop_ready_cycles
+    global junction_confirm_streak
+
+    if carrying_started:
+        post_pick_cycles += 1
+
+        if post_pick_cycles % 15 == 0 and not junction_taken:
+            debug_f = line_features(sensors)
+            print(f"[post_pick] cycle={post_pick_cycles}, "
+                  f"active_count={debug_f['active_count']}, "
+                  f"total={debug_f['total']:.3f}, "
+                  f"max_dev={debug_f['max_deviation']:.3f}, "
+                  f"values={[round(sensors.get(n, 0.0), 3) for n in SENSOR_ORDER]}")
+
+    # -------------------------------------------------------------
+    # Detect the junction and choose the target route.
+    #
+    # A single matching frame isn't enough to commit to a turn — a
+    # narrow bracket-shaped marker along the trunk can momentarily
+    # look like a junction (extra edges / uniform low reading) for
+    # a cycle or two as the sensor sweeps past it. A real trident is
+    # wide, so the robot will keep reading "junction-like" for many
+    # consecutive cycles as it approaches. Require several in a row
+    # before committing, and reset the streak the moment a frame
+    # doesn't match.
+    # -------------------------------------------------------------
+    if (
+        carrying_started
+        and target_color is not None
+        and not junction_taken
+        and post_pick_cycles >= JUNCTION_MIN_CYCLES
+    ):
+        if junction_detected(sensors):
+            junction_confirm_streak += 1
+        else:
+            junction_confirm_streak = 0
+
+        if junction_confirm_streak >= JUNCTION_CONFIRM_CYCLES:
+            junction_taken = True
+
+            if target_color == "blue":
+                turn_cycles_left = 0
+                straight_cycles_left = STRAIGHT_CYCLES
+            else:
+                turn_cycles_left = TURN_CYCLES
+                straight_cycles_left = 0
+
+            debug_features = line_features(sensors)
+            print(f"Junction detected. Taking {target_color} route. "
+                  f"active_count={debug_features['active_count']}, "
+                  f"total={debug_features['total']:.3f}, "
+                  f"values={[sensors.get(n, 0.0) for n in SENSOR_ORDER]}")
+
+        elif junction_confirm_streak > 0:
+            # Mid-confirmation: we're inside (or just entering) the
+            # diffuse zone but haven't hit JUNCTION_CONFIRM_CYCLES yet.
+            # Slow to a crawl instead of running full-speed PID, so we
+            # don't sail past the (brief) diffuse zone and out into the
+            # open gap before we've had a chance to commit to the turn.
+            print(f"[confirming junction] streak={junction_confirm_streak}, "
+                  f"total={line_features(sensors)['total']:.3f}")
+            return 0.5, 0.5
+
+    # -------------------------------------------------------------
+    # Blue: force straight through the trident so side-branch lines
+    # don't drag the PID off-centre right at the split.
+    # -------------------------------------------------------------
+    if junction_taken and straight_cycles_left > 0:
+        straight_cycles_left -= 1
+        return 1.7, 1.7
+
+    # -------------------------------------------------------------
+    # Sharp turn into the selected red/green branch.
+    #   red   -> left turn  (red branch is on the left of the map)
+    #   green -> right turn (green branch is on the right of the map)
+    # -------------------------------------------------------------
+    if junction_taken and turn_cycles_left > 0:
+        if turn_cycles_left == TURN_CYCLES:
+            print(f"Starting {target_color} turn. cycles={TURN_CYCLES}, "
+                  f"position={line_features(sensors)['position']:.3f}")
+
+        turn_cycles_left -= 1
+
+        if turn_cycles_left == 0:
+            print(f"Turn cycles finished. position={line_features(sensors)['position']:.3f}")
+
+        if target_color == "red":
+            # Sharp left.
+            return 0.5, 2.3
+
+        if target_color == "green":
+            # Sharp right.
+            return 2.3, 0.5
+
+    # -------------------------------------------------------------
+    # Before handing back to PID, confirm the robot is actually
+    # off-centre on the curved branch. If it's still reading close
+    # to straight-on, the turn was too short — extend it a little
+    # rather than silently falling through to plain PID (which would
+    # just re-lock onto the trunk and look like "going straight").
+    # -------------------------------------------------------------
+    if (
+        junction_taken
+        and turn_cycles_left == 0
+        and straight_cycles_left == 0
+        and not drop_ready
+        and target_color in ("red", "green")
+    ):
+        features_check = line_features(sensors)
+
+        if (
+            features_check["max_deviation"] < OFF_CENTER_DEVIATION
+            and turn_extension_used < MAX_TURN_EXTENSION
+        ):
+            turn_extension_used += 1
+            if target_color == "red":
+                return 0.5, 2.3
+            return 2.3, 0.5
+
+    if junction_taken and turn_cycles_left == 0 and straight_cycles_left == 0:
+        if not drop_ready:
+            print("Turn complete. drop_ready=True, resuming PID toward marker.")
+            drop_ready_cycles = 0
+        drop_ready = True
+
+    # -------------------------------------------------------------
+    # PID line following from Task 1A.
+    # -------------------------------------------------------------
+    features = line_features(sensors)
+
+    line_lost = (
+        features["total"] < 0.08
+        or features["max_deviation"] < 0.08
     )
 
-# =============================================================================
-#  Main loop (Don't Edit this)
-# =============================================================================
+    if line_lost:
+        lost_streak += 1
+
+        if lost_streak == 1 and junction_taken:
+            print(f"Line lost after junction. target={target_color}, "
+                  f"turn_cycles_left={turn_cycles_left}, drop_ready={drop_ready}")
+
+        if drop_ready:
+            # We already know we're on the right branch, close to the
+            # marker — don't oscillate searching for the line, just creep
+            # forward. Taper the speed down as we get closer so we don't
+            # fly past the marker before the drop actually fires.
+            proximity_now = sensors.get("proximity", 1.0)
+
+            if proximity_now < 0.30:
+                creep = 0.35
+            elif proximity_now < 0.55:
+                creep = 0.55
+            else:
+                creep = 0.8
+
+            return creep, creep
+
+        if lost_streak <= 6:
+            base_speed = last_base_speed
+            correction = last_correction
+        else:
+            search_error = 0.6 if previous_error >= 0 else -0.6
+            base_speed = 1.0
+            correction = search_error * 0.6
+
+        correction = max(-0.9, min(0.9, correction))
+
+        left = max(0.0, min(4.0, base_speed - correction))
+        right = max(0.0, min(4.0, base_speed + correction))
+
+        return left, right
+
+    lost_streak = 0
+
+    position = max(-1.5, min(1.5, features["position"]))
+
+    # Same wheel-direction convention as the working Task 1A code.
+    error = -position
+
+    integral += error
+    integral = max(-5.0, min(5.0, integral))
+
+    derivative = error - previous_error
+    correction = (KP * error) + (KI * integral) + (KD * derivative)
+
+    correction = max(-1.0, min(1.0, correction))
+
+    previous_error = error
+
+    base_speed = 1.7 - (0.45 * abs(error))
+    base_speed = max(1.0, min(1.7, base_speed))
+
+    last_correction = correction
+    last_base_speed = base_speed
+
+    left = max(0.0, min(4.0, base_speed - correction))
+    right = max(0.0, min(4.0, base_speed + correction))
+
+    return left, right
+
+
 def main():
     client = CoppeliaClient(host="127.0.0.1", port=50002)
     client.connect()
-    print("Connected to 2a_wrapper. Running... (Ctrl+C to stop)")
+    print("Connected to bridge_v2_2a. Running... (Ctrl+C to stop)")
 
-    last_sensors   = None
-    carrying_box   = False
+    carrying_box = False
     detected_color = None
 
     try:
         while True:
+            # Use only new sensor packets.
             sensors = client.receive_sensor_data()
+
             if sensors is None:
                 time.sleep(0.01)
                 continue
-            last_sensors = sensors
 
-            if detected_color is None:
-               p = last_sensors.get('proximity', 1.0)
-               near_box = carrying_box or (0.0 < p < PICK_PROXIMITY_THRESHOLD)
-               if near_box:
-                 color = detect_color(last_sensors)
-                 if color is not None:
-                   detected_color = color
-                   print(f"Color detected: {color!r}")
+            # Detect package colour.
+            if not carrying_box and detected_color is None:
+                color = detect_color(sensors)
 
-            # --- Pick ---
-            if not carrying_box and should_pick(last_sensors, carrying_box):
-              client.send_motor_command(0.0, 0.0)
-              time.sleep(0.35)  # short settle
-              success = client.send_pick()
-              print(f"PICK attempted  — success={success}")
-              if success:
-               carrying_box = True
-              time.sleep(0.05)
-              continue
+                if color is not None:
+                    detected_color = color
+                    print(f"Target color set to: {detected_color}")
 
-            # --- Drop ---
-            if carrying_box and should_drop(last_sensors, carrying_box, detected_color):
-                success = client.send_drop()
-                print(f"DROP attempted  — success={success}")
+            # Pick package.
+            if not carrying_box and should_pick(sensors, carrying_box):
+                client.send_motor_command(0.0, 0.0)
+
+                success = client.send_pick()
+                print(f"PICK attempted - success={success}")
+
                 if success:
-                    carrying_box = False
-                    detected_color = None
-                time.sleep(0.05)
-                continue
+                    carrying_box = True
+                    print(f"Carrying {detected_color} box.")
 
-            # --- Motor command ---
-            left, right = control_loop(last_sensors)
+            # Drop package.
+            if carrying_box and should_drop(
+                sensors,
+                carrying_box,
+                detected_color
+            ):
+                client.send_motor_command(0.0, 0.0)
+
+                success = client.send_drop()
+                print(f"DROP attempted - success={success}")
+
+                if success:
+                    print("Task completed.")
+                    break
+
+                print("DROP rejected. Continuing on the line.")
+
+            # Drive robot.
+            left, right = control_loop(sensors)
             client.send_motor_command(left, right)
-
-            time.sleep(0.05)   # ~20 Hz control loop
 
     except KeyboardInterrupt:
         print("\nStopping...")
+
     finally:
         try:
             client.send_motor_command(0.0, 0.0)
         except Exception:
             pass
+
         client.close()
 
 
 if __name__ == "__main__":
-
     main()
