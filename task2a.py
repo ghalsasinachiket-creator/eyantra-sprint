@@ -219,6 +219,9 @@ def should_drop(sensors, carrying_box, detected_color):
     if not carrying_box:
         return False
 
+    # Mark that we started carrying as soon as the box is picked.
+    # Previously this only became true once drop_ready was already reached,
+    # which prevented branch selection/turning from kicking in at the right time.
     carrying_started = True
 
     if not drop_ready:
@@ -473,7 +476,6 @@ def control_loop(sensors):
 
         return left, right
 
-    lost_streak = 0
 
     position = max(-1.5, min(1.5, features["position"]))
 
