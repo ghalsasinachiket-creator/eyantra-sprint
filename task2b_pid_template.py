@@ -50,76 +50,112 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 #  You may add helper functions anywhere in this section.
 # =============================================================================
 
+# ---- tuning constants (start here, adjust after watching it run) ----------
+SENSOR_WEIGHTS = {'left_corner': -2.0, 'left': -1.0, 'middle': 0.0,
+                   'right': 1.0, 'right_corner': 2.0}
+
+KP, KI, KD = 3.0, 0.0, 1.5     # PID gains
+BASE_SPEED = 3.0               # rad/s, nominal forward speed
+MAX_SPEED = 5.0                # rad/s, wheel speed clamp
+CURVE_SLOWDOWN = 0.6           # fraction of BASE_SPEED shed when error is large
+
+LINE_PRESENT_THRESHOLD = 0.35  # below this total "line-ness" => treat as a gap
+PICK_PROXIMITY = 0.08          # metres — TUNE: distance that counts as "box is here"
+DROP_PROXIMITY = 0.12          # metres — TUNE: distance that counts as "at the zone"
+COLOR_CONFIDENCE = 0.15        # margin the dominant channel must lead by
+
+# PID state carried between control_loop() calls (the function itself is
+# only given the latest sensor reading, so the running terms live here).
+_pid_state = {'integral': 0.0, 'last_error': 0.0, 'last_time': None}
+
+
+def _line_signals(sensors):
+    """Turn raw reflectance readings into a 'line-ness' value that is always
+    HIGH when a sensor sits on the line — whether this stretch is a white
+    line on black, or a black line on white.
+
+    We guess the regime from the average of all five readings: if the arena
+    is mostly dark (avg < 0.5) the line is the bright bit, so raw value IS
+    the signal; if the arena is mostly bright, the line is the dark bit, so
+    we invert.
+    """
+    raw = [sensors[name] for name in SENSOR_ORDER]
+    avg = sum(raw) / len(raw)
+    return raw if avg < 0.5 else [1.0 - v for v in raw]
+
+
 def control_loop(sensors):
     """Return (left_speed, right_speed) for the current sensor reading.
 
-    Args:
-        sensors (dict): 'left_corner','left','middle','right','right_corner' [0,1],
-                        'proximity' (m), 'color_r','color_g','color_b' [0,1].
-
-    Returns:
-        tuple[float, float]: (left_speed, right_speed) in rad/s.
-
     TODO (participants): replace the placeholder with your PID controller.
-    Because the track switches between white-on-black and black-on-white, a
-    plain "higher = line" error will fail on one half. Consider detecting which
-    regime you're in (e.g. from the overall brightness) and flipping the sign,
-    or using an error term that works for both.
     """
-    # ----- placeholder: drive straight slowly. REPLACE THIS. -----
-    base_speed = 2.0
-    return base_speed, base_speed
+    signals = _line_signals(sensors)
+    total = sum(signals)
+
+    now = time.time()
+    dt = (now - _pid_state['last_time']) if _pid_state['last_time'] else 0.05
+    dt = max(dt, 1e-3)
+    _pid_state['last_time'] = now
+
+    if total > LINE_PRESENT_THRESHOLD:
+        # weighted centroid of where the line sits under the sensor bar
+        weights = [SENSOR_WEIGHTS[name] for name in SENSOR_ORDER]
+        error = sum(w * s for w, s in zip(weights, signals)) / total
+    else:
+        # dashed-line gap: nothing detected this cycle. Coast on the last
+        # known error instead of snapping to 0 (which would drive straight
+        # off a curve) or stopping.
+        error = _pid_state['last_error']
+
+    _pid_state['integral'] += error * dt
+    derivative = (error - _pid_state['last_error']) / dt
+    _pid_state['last_error'] = error
+
+    correction = KP * error + KI * _pid_state['integral'] + KD * derivative
+
+    # shed speed on sharp curves (large |error|) so corrections can catch up
+    speed = BASE_SPEED * (1.0 - min(abs(error), 1.0) * CURVE_SLOWDOWN)
+
+    left_speed = max(min(speed + correction, MAX_SPEED), -MAX_SPEED)
+    right_speed = max(min(speed - correction, MAX_SPEED), -MAX_SPEED)
+    return left_speed, right_speed
 
 
 def detect_color(sensors):
-    """Identify the colour of the box in front from the RGB sensor.
-
-    Returns:
-        str | None: "red", "blue", or None if no confident detection.
+    """Identify the colour of the box/zone in front from the RGB sensor.
 
     TODO (participants): compare color_r / color_g / color_b and return the
     dominant colour once it is above a confidence threshold.
     """
-    # ----- placeholder: never detects. REPLACE THIS. -----
+    r, g, b = sensors['color_r'], sensors['color_g'], sensors['color_b']
+    if r - max(g, b) > COLOR_CONFIDENCE:
+        return "red"
+    if b - max(r, g) > COLOR_CONFIDENCE:
+        return "blue"
     return None
 
 
 def should_pick(sensors, carrying_color):
     """Decide whether to send a PICK this cycle.
 
-    Args:
-        sensors (dict): latest sensor values.
-        carrying_color (str | None): colour currently held, or None if empty-handed.
-
-    Returns:
-        bool: True to attempt a PICK now.
-
-    NOTE: the bridge only picks if a box is actually next to the gripper, so a
-    PICK when nothing is close simply returns failure. Only pick when NOT
-    already carrying a box (carrying_color is None).
-
     TODO (participants): use sensors['proximity'] to detect that a box is close.
     """
-    # ----- placeholder: never picks. REPLACE THIS. -----
-    return False
+    if carrying_color is not None:
+        return False
+    return sensors['proximity'] < PICK_PROXIMITY
 
 
 def should_drop(sensors, carrying_color):
     """Decide whether to send a DROP this cycle.
 
-    Args:
-        sensors (dict): latest sensor values.
-        carrying_color (str | None): colour currently held, or None.
-
-    Returns:
-        bool: True to attempt a DROP now.
-
     TODO (participants): only drop when carrying_color is not None AND you have
-    navigated to the drop zone that matches carrying_color
-    ("red" -> red zone, "blue" -> blue zone).
+    navigated to the drop zone that matches carrying_color.
     """
-    # ----- placeholder: never drops. REPLACE THIS. -----
-    return False
+    if carrying_color is None:
+        return False
+    if sensors['proximity'] >= DROP_PROXIMITY:
+        return False
+    return detect_color(sensors) == carrying_color
 
 
 # =============================================================================
