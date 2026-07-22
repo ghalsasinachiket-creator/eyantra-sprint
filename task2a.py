@@ -36,7 +36,7 @@ MIN_DROP_READY_CYCLES_STRAIGHT = 15  # blue: short straight run, proximity-based
 MIN_TRAVEL_BEFORE_LINE_END_DROP = 100
 
 # Sharp turn at the junction for red/green branches.
-TURN_CYCLES = 14
+TURN_CYCLES = 5
 MAX_TURN_EXTENSION = 20  # hard cap so a bad turn can't run away forever
 
 # Forced straight-through for blue, so the trident's side branches
@@ -313,26 +313,14 @@ def control_loop(sensors):
                   f"max_dev={debug_f['max_deviation']:.3f}, "
                   f"values={[round(sensors.get(n, 0.0), 3) for n in SENSOR_ORDER]}")
 
-    # -------------------------------------------------------------
-    # Detect the junction and choose the target route.
-    #
-    # A single matching frame isn't enough to commit to a turn — a
-    # narrow bracket-shaped marker along the trunk can momentarily
-    # look like a junction (extra edges / uniform low reading) for
-    # a cycle or two as the sensor sweeps past it. A real trident is
-    # wide, so the robot will keep reading "junction-like" for many
-    # consecutive cycles as it approaches. Require several in a row
-    # before committing, and reset the streak the moment a frame
-    # doesn't match.
-    # -------------------------------------------------------------
+    # Junction detection & commit to a direction — purely from the box's
+    # own color (target_color), fixed at pickup and never re-read here.
     if (
         carrying_started
         and target_color is not None
         and not junction_taken
         and post_pick_cycles >= JUNCTION_MIN_CYCLES
     ):
-        # Junction detection can be noisy; if we never lock, force the
-        # turn after a reasonable window to avoid "freezing" in recovery.
         if post_pick_cycles > (JUNCTION_MIN_CYCLES + JUNCTION_MAX_CYCLES_AFTER_MIN):
             junction_taken = True
             if target_color == "blue":
@@ -352,7 +340,6 @@ def control_loop(sensors):
 
             if junction_confirm_streak >= JUNCTION_CONFIRM_CYCLES:
                 junction_taken = True
-
                 if target_color == "blue":
                     turn_cycles_left = 0
                     straight_cycles_left = STRAIGHT_CYCLES
@@ -368,72 +355,28 @@ def control_loop(sensors):
                           f"values={[sensors.get(n, 0.0) for n in SENSOR_ORDER]}")
 
             elif junction_confirm_streak > 0:
-                # Mid-confirmation: we're inside (or just entering) the
-                # diffuse zone but haven't hit JUNCTION_CONFIRM_CYCLES yet.
-                # Slow to a crawl instead of running full-speed PID, so we
-                # don't sail past the (brief) diffuse zone and out into the
-                # open gap before we've had a chance to commit to the turn.
                 if DEBUG:
                     print(f"[confirming junction] streak={junction_confirm_streak}, "
                           f"total={line_features(sensors)['total']:.3f}")
                 return 0.5, 0.5
 
-    # -------------------------------------------------------------
-    # Blue: force straight through the trident so side-branch lines
-    # don't drag the PID off-centre right at the split.
-    # -------------------------------------------------------------
+    # Blue: force straight through the trident.
     if junction_taken and straight_cycles_left > 0:
         straight_cycles_left -= 1
         return 1.7, 1.7
 
-    # -------------------------------------------------------------
-    # Sharp turn into the selected red/green branch.
-    #   red   -> left turn  (red branch is on the left of the map)
-    #   green -> right turn (green branch is on the right of the map)
-    # -------------------------------------------------------------
+    # Red/green: SHORT open-loop nudge onto the correct branch — just
+    # enough to break the tie at the split. PID resumes right after.
+    #   red   -> nudge left   green -> nudge right
     if junction_taken and turn_cycles_left > 0:
-        if turn_cycles_left == TURN_CYCLES and DEBUG:
-            print(f"Starting {target_color} turn. cycles={TURN_CYCLES}, "
-                  f"position={line_features(sensors)['position']:.3f}")
-
         turn_cycles_left -= 1
-
-        if turn_cycles_left == 0 and DEBUG:
-            print(f"Turn cycles finished. position={line_features(sensors)['position']:.3f}")
-
         if target_color == "red":
-            # Sharp left.
-            return 0.5, 2.3
-
+            return 0.7, 1.6
         if target_color == "green":
-            # Sharp right.
-            return 2.3, 0.5
+            return 1.6, 0.7
 
-    # -------------------------------------------------------------
-    # Before handing back to PID, confirm the robot is actually
-    # off-centre on the curved branch. If it's still reading close
-    # to straight-on, the turn was too short — extend it a little
-    # rather than silently falling through to plain PID (which would
-    # just re-lock onto the trunk and look like "going straight").
-    # -------------------------------------------------------------
-    if (
-        junction_taken
-        and turn_cycles_left == 0
-        and straight_cycles_left == 0
-        and not drop_ready
-        and target_color in ("red", "green")
-    ):
-        features_check = line_features(sensors)
-
-        if (
-            features_check["max_deviation"] < OFF_CENTER_DEVIATION
-            and turn_extension_used < MAX_TURN_EXTENSION
-        ):
-            turn_extension_used += 1
-            if target_color == "red":
-                return 0.5, 2.3
-            return 2.3, 0.5
-
+    # Nudge/straight phase done — hand off to normal PID for the rest
+    # of the branch. No "extend the turn" detour anymore.
     if junction_taken and turn_cycles_left == 0 and straight_cycles_left == 0:
         if not drop_ready:
             if DEBUG:
@@ -441,41 +384,19 @@ def control_loop(sensors):
             drop_ready_cycles = 0
         drop_ready = True
 
-    # -------------------------------------------------------------
-    # PID line following from Task 1A.
-    # -------------------------------------------------------------
+    # PID line following.
     features = line_features(sensors)
-
-    line_lost = (
-        features["total"] < 0.08
-        or features["max_deviation"] < 0.08
-    )
+    line_lost = features["total"] < 0.08 or features["max_deviation"] < 0.08
 
     if line_lost:
         lost_streak += 1
 
         if lost_streak == 1 and junction_taken and DEBUG:
-            print(
-                f"Line lost after junction. target={target_color}, "
-                f"turn_cycles_left={turn_cycles_left}, drop_ready={drop_ready}"
-            )
+            print(f"Line lost after junction. target={target_color}, "
+                  f"turn_cycles_left={turn_cycles_left}, drop_ready={drop_ready}")
 
-        if drop_ready:
-            # We already know we're on the right branch, close to the
-            # marker — don't oscillate searching for the line, just creep
-            # forward. Taper the speed down as we get closer so we don't
-            # fly past the marker before the drop actually fires.
-            proximity_now = sensors.get("proximity", 1.0)
-
-            if proximity_now < 0.30:
-                creep = 0.35
-            elif proximity_now < 0.55:
-                creep = 0.55
-            else:
-                creep = 0.8
-
-            return creep, creep
-
+        # No more "if drop_ready: creep straight, ignore line" shortcut.
+        # Steering is never disabled — this is what stops the freeze.
         if lost_streak <= 6:
             base_speed = last_base_speed
             correction = last_correction
@@ -485,16 +406,11 @@ def control_loop(sensors):
             correction = search_error * 0.6
 
         correction = max(-0.9, min(0.9, correction))
-
         left = max(0.0, min(4.0, base_speed - correction))
         right = max(0.0, min(4.0, base_speed + correction))
-
         return left, right
 
-
     position = max(-1.5, min(1.5, features["position"]))
-
-    # Same wheel-direction convention as the working Task 1A code.
     error = -position
 
     integral += error
@@ -502,9 +418,7 @@ def control_loop(sensors):
 
     derivative = error - previous_error
     correction = (KP * error) + (KI * integral) + (KD * derivative)
-
     correction = max(-1.0, min(1.0, correction))
-
     previous_error = error
 
     base_speed = 1.7 - (0.45 * abs(error))
@@ -515,7 +429,6 @@ def control_loop(sensors):
 
     left = max(0.0, min(4.0, base_speed - correction))
     right = max(0.0, min(4.0, base_speed + correction))
-
     return left, right
 
 
