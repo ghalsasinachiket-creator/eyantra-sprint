@@ -24,7 +24,7 @@ KI = 0.00
 KD = 0.15
 
 PICK_DISTANCE = 0.14
-DROP_DISTANCE = 0.19
+DROP_DISTANCE = 0.12
 MIN_DROP_READY_CYCLES_STRAIGHT = 15  # blue: short straight run, proximity-based
 
 # Red/green: proximity is unusable (proven flat/constant regardless of
