@@ -34,7 +34,7 @@ SENSOR PROTOCOL (from bridge_v1_2b.py):
   Proximity:     'proximity' — metres to nearest object; 1.0 = nothing in range.
   Color sensor:  'color_r','color_g','color_b' — [0,1].
 
-Team ID: [ XXX ]
+Team ID: [ 403]
 """
 
 import time
@@ -80,8 +80,15 @@ def _line_signals(sensors):
     we invert.
     """
     raw = [sensors[name] for name in SENSOR_ORDER]
-    avg = sum(raw) / len(raw)
-    return raw if avg < 0.5 else [1.0 - v for v in raw]
+    #avg = sum(raw) / len(raw)
+    #return raw if avg < 0.5 else [1.0 - v for v in raw]
+    med = sorted(raw)[2] #median is 5
+    if med < 0.5:
+        return raw # background dark -> line is bright, use as-is
+    else:
+        return [1.0 - v for v in raw] #background bright -> invert
+
+
 
 
 def control_loop(sensors):
