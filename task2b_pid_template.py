@@ -127,9 +127,9 @@ def control_loop(sensors):
         derivative = (error - _pid_state['last_error']) / dt
         _pid_state['last_error'] = error
 
-    _pid_state['integral'] += error * dt
-    derivative = (error - _pid_state['last_error']) / dt
-    _pid_state['last_error'] = error
+    #_pid_state['integral'] += error * dt
+    #derivative = (error - _pid_state['last_error']) / dt
+    #_pid_state['last_error'] = error
 
     correction = KP * error + KI * _pid_state['integral'] + KD * derivative
 
