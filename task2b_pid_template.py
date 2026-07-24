@@ -68,7 +68,7 @@ COLOR_CONFIDENCE = 0.15        # margin the dominant channel must lead by
 # only given the latest sensor reading, so the running terms live here).
 _pid_state = {'integral': 0.0, 'last_error': 0.0, 'last_time': None}
 
-
+_regime_state = {'inverted': False}
 def _line_signals(sensors):
     """Turn raw reflectance readings into a 'line-ness' value that is always
     HIGH when a sensor sits on the line — whether this stretch is a white
@@ -79,14 +79,15 @@ def _line_signals(sensors):
     the signal; if the arena is mostly bright, the line is the dark bit, so
     we invert.
     """
-    raw = [sensors[name] for name in SENSOR_ORDER]
-    #avg = sum(raw) / len(raw)
-    #return raw if avg < 0.5 else [1.0 - v for v in raw]
-    med = sorted(raw)[2] #median is 5
-    if med < 0.5:
-        return raw # background dark -> line is bright, use as-is
-    else:
-        return [1.0 - v for v in raw] #background bright -> invert
+    def _line_signals(sensors):
+      raw = [sensors[name] for name in SENSOR_ORDER]
+      med = sorted(raw)[2]
+      if med < 0.4:
+        _regime_state['inverted'] = False
+      elif med > 0.6:
+        _regime_state['inverted'] = True
+    # else: keep previous regime, don't flip on ambiguous readings
+    return [1.0 - v for v in raw] if _regime_state['inverted'] else raw
 
 
 
@@ -113,6 +114,18 @@ def control_loop(sensors):
         # known error instead of snapping to 0 (which would drive straight
         # off a curve) or stopping.
         error = _pid_state['last_error']
+
+    if dt is None:
+        # first-ever call: no history to differentiate against, so don't kick
+        _pid_state['integral'] = 0.0
+        _pid_state['last_error'] = error
+        derivative = 0.0
+        dt = 0.05
+    else:
+        dt = max(dt, 1e-3)
+        _pid_state['integral'] += error * dt
+        derivative = (error - _pid_state['last_error']) / dt
+        _pid_state['last_error'] = error
 
     _pid_state['integral'] += error * dt
     derivative = (error - _pid_state['last_error']) / dt
