@@ -1,7 +1,8 @@
-- [ ] Update task2a.py:
-  - [ ] Add DEBUG + print throttling (remove high-frequency RGB prints)
-  - [ ] Prevent simultaneous socket reads/writes by not calling receive_sensor_data / control_loop while waiting for PICK/DROP replies
-  - [ ] Add small time.sleep to avoid sending commands faster than bridge reads
-  - [ ] Ensure motor commands are stopped during pick/drop attempts and that we return/continue correctly after each attempt
-- [ ] Run quick sanity test (start task2a.py and confirm it proceeds to pick & drop without freezing)
-- [ ] If still freezing, inspect additional connector/client interaction and apply further throttling/timeout
+- [x] Fix `_line_signals()` in `task2b_pid_template.py`:
+  - [x] Removed nested `def _line_signals()` (never called, shadowed outer function)
+  - [x] Fixed `raw` variable: now computed in outer scope instead of inner dead scope
+  - [x] Fixed `NameError: name 'raw' is not defined` that crashed the robot instantly
+- [x] Cleaned up `control_loop()` dead code:
+  - [x] Removed duplicate `dt = max(dt, 1e-3)` (already done before the if/else)
+  - [x] Removed commented-out stale PID update lines
+- [ ] Run quick sanity test (start task2b_pid_template.py and confirm it tracks lines)

@@ -79,12 +79,11 @@ def _line_signals(sensors):
     the signal; if the arena is mostly bright, the line is the dark bit, so
     we invert.
     """
-    def _line_signals(sensors):
-      raw = [sensors[name] for name in SENSOR_ORDER]
-      med = sorted(raw)[2]
-      if med < 0.4:
+    raw = [sensors[name] for name in SENSOR_ORDER]
+    med = sorted(raw)[2]
+    if med < 0.4:
         _regime_state['inverted'] = False
-      elif med > 0.6:
+    elif med > 0.6:
         _regime_state['inverted'] = True
     # else: keep previous regime, don't flip on ambiguous readings
     return [1.0 - v for v in raw] if _regime_state['inverted'] else raw
@@ -122,14 +121,9 @@ def control_loop(sensors):
         derivative = 0.0
         dt = 0.05
     else:
-        dt = max(dt, 1e-3)
         _pid_state['integral'] += error * dt
         derivative = (error - _pid_state['last_error']) / dt
         _pid_state['last_error'] = error
-
-    #_pid_state['integral'] += error * dt
-    #derivative = (error - _pid_state['last_error']) / dt
-    #_pid_state['last_error'] = error
 
     correction = KP * error + KI * _pid_state['integral'] + KD * derivative
 
