@@ -54,15 +54,21 @@ SENSOR_ORDER = ['left_corner', 'left', 'middle', 'right', 'right_corner']
 SENSOR_WEIGHTS = {'left_corner': -2.0, 'left': -1.0, 'middle': 0.0,
                    'right': 1.0, 'right_corner': 2.0}
 
-KP, KI, KD = 3.0, 0.0, 1.5     # PID gains
-BASE_SPEED = 3.0               # rad/s, nominal forward speed
-MAX_SPEED = 5.0                # rad/s, wheel speed clamp
-CURVE_SLOWDOWN = 0.6           # fraction of BASE_SPEED shed when error is large
+KP, KI, KD = 0.65, 0.0, 0.15    # PID gains (reduced from 3.0/1.5 — was causing violent oscillation)
+BASE_SPEED = 2.0               # rad/s, nominal forward speed (reduced from 3.0)
+MAX_SPEED = 4.0                # rad/s, wheel speed clamp
+CURVE_SLOWDOWN = 0.5           # fraction of BASE_SPEED shed when error is large
 
 LINE_PRESENT_THRESHOLD = 0.35  # below this total "line-ness" => treat as a gap
 PICK_PROXIMITY = 0.08          # metres — TUNE: distance that counts as "box is here"
 DROP_PROXIMITY = 0.12          # metres — TUNE: distance that counts as "at the zone"
 COLOR_CONFIDENCE = 0.15        # margin the dominant channel must lead by
+
+# Maximum rate of change of error per second (for derivative clamping).
+# Prevents the D-term from exploding when the error jumps suddenly between
+# cycles — e.g. when the robot re-acquires the line after a gap, or the
+# sensor noise spikes. Units: error-units / second.
+MAX_D_ERROR_PER_SEC = 5.0
 
 # PID state carried between control_loop() calls (the function itself is
 # only given the latest sensor reading, so the running terms live here).
@@ -100,8 +106,11 @@ def control_loop(sensors):
     total = sum(signals)
 
     now = time.time()
-    dt = (now - _pid_state['last_time']) if _pid_state['last_time'] else 0.05
-    dt = max(dt, 1e-3)
+    first_call = _pid_state['last_time'] is None
+    if first_call:
+        dt = 0.05
+    else:
+        dt = max(now - _pid_state['last_time'], 1e-3)
     _pid_state['last_time'] = now
 
     if total > LINE_PRESENT_THRESHOLD:
@@ -114,15 +123,18 @@ def control_loop(sensors):
         # off a curve) or stopping.
         error = _pid_state['last_error']
 
-    if dt is None:
-        # first-ever call: no history to differentiate against, so don't kick
+    if first_call:
+        # First call: no previous error to differentiate against.
+        # Reset integral and set derivative = 0 to avoid a massive kick.
         _pid_state['integral'] = 0.0
         _pid_state['last_error'] = error
         derivative = 0.0
-        dt = 0.05
     else:
         _pid_state['integral'] += error * dt
-        derivative = (error - _pid_state['last_error']) / dt
+        # Clamp the derivative to prevent spikes when error jumps suddenly
+        # (e.g. re-acquiring line after a gap, or sensor noise).
+        raw_derivative = (error - _pid_state['last_error']) / dt
+        derivative = max(min(raw_derivative, MAX_D_ERROR_PER_SEC), -MAX_D_ERROR_PER_SEC)
         _pid_state['last_error'] = error
 
     correction = KP * error + KI * _pid_state['integral'] + KD * derivative

@@ -1,8 +1,8 @@
-- [x] Fix `_line_signals()` in `task2b_pid_template.py`:
-  - [x] Removed nested `def _line_signals()` (never called, shadowed outer function)
-  - [x] Fixed `raw` variable: now computed in outer scope instead of inner dead scope
-  - [x] Fixed `NameError: name 'raw' is not defined` that crashed the robot instantly
-- [x] Cleaned up `control_loop()` dead code:
-  - [x] Removed duplicate `dt = max(dt, 1e-3)` (already done before the if/else)
-  - [x] Removed commented-out stale PID update lines
+- [x] Fix `task2b_pid_template.py` bugs causing "runs off course":
+  - [x] **CRITICAL BUG #1**: `_line_signals()` nested function — removed dead inner `def _line_signals()` that shadowed the outer function. `raw` variable was out-of-scope → `NameError` crash.
+  - [x] **CRITICAL BUG #2**: `if dt is None` unreachable — `dt` was always a float (`0.05` from the ternary), so first-call special-case **never fired**. First derivative = `(error - 0.0)/0.05 = 20× error` → massive D-term kick with `KD=1.5` caused violent overcorrection/oscillation.
+  - [x] **CRITICAL BUG #3**: PID gains too aggressive — `KP=3.0, KD=1.5` vs working task2a (`KP=0.65, KD=0.15`). Reduced to match.
+  - [x] **CRITICAL BUG #4**: `BASE_SPEED=3.0` too fast for correction to keep up. Reduced to `2.0`.
+  - [x] Added derivative clamping (`MAX_D_ERROR_PER_SEC=5.0`) to prevent spikes when error jumps (re-acquiring line after gap, sensor noise).
+  - [x] Cleaned up dead/commented-out code in `control_loop()`.
 - [ ] Run quick sanity test (start task2b_pid_template.py and confirm it tracks lines)
