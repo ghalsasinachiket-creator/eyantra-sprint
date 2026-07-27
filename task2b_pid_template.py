@@ -110,6 +110,7 @@ def control_loop(sensors):
 
     TODO (participants): replace the placeholder with your PID controller.
     """
+    _debug_count = {'n': 0}
     signals = _line_signals(sensors)
     print(f"med={sorted([sensors[n] for n in SENSOR_ORDER])[2]:.3f} inv={_regime_state['inverted']} signals={signals} error={error:.3f}", flush=True)
     total = sum(signals)
@@ -153,6 +154,12 @@ def control_loop(sensors):
 
     left_speed = max(min(speed + correction, MAX_SPEED), -MAX_SPEED)
     right_speed = max(min(speed - correction, MAX_SPEED), -MAX_SPEED)
+    if _debug_count['n'] < 30:
+        print(f"[{_debug_count['n']:02d}] med={sorted([sensors[n] for n in SENSOR_ORDER])[2]:.3f} "
+              f"inv={_regime_state['inverted']} signals={signals} error={error:.3f} "
+              f"corr={correction:.3f} L={left_speed:.2f} R={right_speed:.2f}",
+              flush=True)
+        _debug_count['n'] += 1
     return left_speed, right_speed
 
 
