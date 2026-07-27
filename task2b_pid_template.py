@@ -37,6 +37,7 @@ SENSOR PROTOCOL (from bridge_v1_2b.py):
 Team ID: [ 403]
 """
 
+from curses import raw
 import time
 
 from connector_2b import CoppeliaClient
@@ -85,15 +86,24 @@ def _line_signals(sensors):
     the signal; if the arena is mostly bright, the line is the dark bit, so
     we invert.
     """
-    raw = [sensors[name] for name in SENSOR_ORDER]
-    med = sorted(raw)[2]
-    if med < 0.4:
-        _regime_state['inverted'] = False
-    elif med > 0.6:
-        _regime_state['inverted'] = True
-    # else: keep previous regime, don't flip on ambiguous readings
-    return [1.0 - v for v in raw] if _regime_state['inverted'] else raw
+    _regime_state.setdefault('candidate', None)
+_regime_state.setdefault('confirm_count', 0)
+med = sorted(raw)[2]
+if med < 0.4:
+    candidate = False
+elif med > 0.6:
+    candidate = True
+else:
+    candidate = None  # ambiguous, don't touch
 
+if candidate is not None and candidate == _regime_state['candidate']:
+    _regime_state['confirm_count'] += 1
+else:
+    _regime_state['candidate'] = candidate
+    _regime_state['confirm_count'] = 1
+
+if _regime_state['confirm_count'] >= 3:  # tune this
+    _regime_state['inverted'] = _regime_state['candidate']
 
 
 
