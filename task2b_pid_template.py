@@ -80,32 +80,30 @@ def _line_signals(sensors):
     """Turn raw reflectance readings into a 'line-ness' value that is always
     HIGH when a sensor sits on the line — whether this stretch is a white
     line on black, or a black line on white.
-
-    We guess the regime from the average of all five readings: if the arena
-    is mostly dark (avg < 0.5) the line is the bright bit, so raw value IS
-    the signal; if the arena is mostly bright, the line is the dark bit, so
-    we invert.
     """
+    raw = [sensors[name] for name in SENSOR_ORDER]
+
     _regime_state.setdefault('candidate', None)
-_regime_state.setdefault('confirm_count', 0)
-med = sorted(raw)[2]
-if med < 0.4:
-    candidate = False
-elif med > 0.6:
-    candidate = True
-else:
-    candidate = None  # ambiguous, don't touch
+    _regime_state.setdefault('confirm_count', 0)
 
-if candidate is not None and candidate == _regime_state['candidate']:
-    _regime_state['confirm_count'] += 1
-else:
-    _regime_state['candidate'] = candidate
-    _regime_state['confirm_count'] = 1
+    med = sorted(raw)[2]
+    if med < 0.4:
+        candidate = False
+    elif med > 0.6:
+        candidate = True
+    else:
+        candidate = None  # ambiguous, don't touch
 
-if _regime_state['confirm_count'] >= 3:  # tune this
-    _regime_state['inverted'] = _regime_state['candidate']
+    if candidate is not None and candidate == _regime_state['candidate']:
+        _regime_state['confirm_count'] += 1
+    else:
+        _regime_state['candidate'] = candidate
+        _regime_state['confirm_count'] = 1
 
+    if _regime_state['confirm_count'] >= 3:
+        _regime_state['inverted'] = _regime_state['candidate']
 
+    return [1.0 - v for v in raw] if _regime_state['inverted'] else raw
 
 def control_loop(sensors):
     """Return (left_speed, right_speed) for the current sensor reading.
@@ -113,6 +111,7 @@ def control_loop(sensors):
     TODO (participants): replace the placeholder with your PID controller.
     """
     signals = _line_signals(sensors)
+    print(f"med={sorted([sensors[n] for n in SENSOR_ORDER])[2]:.3f} inv={_regime_state['inverted']} signals={signals} error={error:.3f}", flush=True)
     total = sum(signals)
 
     now = time.time()
