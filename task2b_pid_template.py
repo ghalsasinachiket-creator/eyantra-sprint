@@ -74,7 +74,7 @@ MAX_D_ERROR_PER_SEC = 5.0
 # PID state carried between control_loop() calls (the function itself is
 # only given the latest sensor reading, so the running terms live here).
 _pid_state = {'integral': 0.0, 'last_error': 0.0, 'last_time': None}
-_debug_state = {'n': 0}
+_debug_state = {'n': 0, 'min_proximity': None}
 
 def _line_signals(sensors):
     """Return per-sensor line strength independent of line colour.
@@ -93,6 +93,18 @@ def control_loop(sensors):
 
     TODO (participants): replace the placeholder with your PID controller.
     """
+    proximity = sensors['proximity']
+    if (_debug_state['min_proximity'] is None or
+            proximity < _debug_state['min_proximity']):
+        _debug_state['min_proximity'] = proximity
+
+    print(f"[pick-debug {_debug_state['n']:05d}] "
+          f"prox={proximity:.4f} min_prox={_debug_state['min_proximity']:.4f} "
+          f"rgb=({sensors['color_r']:.3f}, {sensors['color_g']:.3f}, "
+          f"{sensors['color_b']:.3f}) color={detect_color(sensors)!r} "
+          f"pick_threshold={PICK_PROXIMITY:.4f}",
+          flush=True)
+
     signals = _line_signals(sensors)
     total = sum(signals)
 
@@ -145,7 +157,7 @@ def control_loop(sensors):
               f"corr={correction:.3f} speed={speed:.3f} "
               f"L={left_speed:.3f} R={right_speed:.3f}",
               flush=True)
-        _debug_state['n'] += 1
+    _debug_state['n'] += 1
     return left_speed, right_speed
 
 
