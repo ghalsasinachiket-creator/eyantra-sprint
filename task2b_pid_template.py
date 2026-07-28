@@ -110,6 +110,7 @@ def control_loop(sensors):
 
     TODO (participants): replace the placeholder with your PID controller.
     """
+    print("control_loop tick", flush=True)
     _debug_count = {'n': 0}
     signals = _line_signals(sensors)
     print(f"med={sorted([sensors[n] for n in SENSOR_ORDER])[2]:.3f} inv={_regime_state['inverted']} signals={signals} error={error:.3f}", flush=True)
