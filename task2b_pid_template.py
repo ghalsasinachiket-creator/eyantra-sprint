@@ -74,46 +74,26 @@ MAX_D_ERROR_PER_SEC = 5.0
 # PID state carried between control_loop() calls (the function itself is
 # only given the latest sensor reading, so the running terms live here).
 _pid_state = {'integral': 0.0, 'last_error': 0.0, 'last_time': None}
+_debug_state = {'n': 0}
 
-_regime_state = {'inverted': False}
 def _line_signals(sensors):
-    """Turn raw reflectance readings into a 'line-ness' value that is always
-    HIGH when a sensor sits on the line — whether this stretch is a white
-    line on black, or a black line on white.
+    """Return per-sensor line strength independent of line colour.
+
+    The useful signal is not the absolute reflectance value; it is the
+    sensor that differs from the local background. A median baseline makes
+    white-on-black and black-on-white look identical from frame 1, with no
+    polarity state to get temporarily stuck in the wrong direction.
     """
     raw = [sensors[name] for name in SENSOR_ORDER]
-
-    _regime_state.setdefault('candidate', None)
-    _regime_state.setdefault('confirm_count', 0)
-
-    med = sorted(raw)[2]
-    if med < 0.4:
-        candidate = False
-    elif med > 0.6:
-        candidate = True
-    else:
-        candidate = None  # ambiguous, don't touch
-
-    if candidate is not None and candidate == _regime_state['candidate']:
-        _regime_state['confirm_count'] += 1
-    else:
-        _regime_state['candidate'] = candidate
-        _regime_state['confirm_count'] = 1
-
-    if _regime_state['confirm_count'] >= 3:
-        _regime_state['inverted'] = _regime_state['candidate']
-
-    return [1.0 - v for v in raw] if _regime_state['inverted'] else raw
+    baseline = sorted(raw)[2]
+    return [abs(value - baseline) for value in raw]
 
 def control_loop(sensors):
     """Return (left_speed, right_speed) for the current sensor reading.
 
     TODO (participants): replace the placeholder with your PID controller.
     """
-    print("control_loop tick", flush=True)
-    _debug_count = {'n': 0}
     signals = _line_signals(sensors)
-    print(f"med={sorted([sensors[n] for n in SENSOR_ORDER])[2]:.3f} inv={_regime_state['inverted']} signals={signals} error={error:.3f}", flush=True)
     total = sum(signals)
 
     now = time.time()
@@ -152,15 +132,20 @@ def control_loop(sensors):
 
     # shed speed on sharp curves (large |error|) so corrections can catch up
     speed = BASE_SPEED * (1.0 - min(abs(error), 1.0) * CURVE_SLOWDOWN)
+    correction = max(min(correction, speed), -speed)
 
-    left_speed = max(min(speed + correction, MAX_SPEED), -MAX_SPEED)
-    right_speed = max(min(speed - correction, MAX_SPEED), -MAX_SPEED)
-    if _debug_count['n'] < 30:
-        print(f"[{_debug_count['n']:02d}] med={sorted([sensors[n] for n in SENSOR_ORDER])[2]:.3f} "
-              f"inv={_regime_state['inverted']} signals={signals} error={error:.3f} "
-              f"corr={correction:.3f} L={left_speed:.2f} R={right_speed:.2f}",
+    left_speed = max(min(speed + correction, MAX_SPEED), 0.0)
+    right_speed = max(min(speed - correction, MAX_SPEED), 0.0)
+    if _debug_state['n'] < 30:
+        raw = [sensors[name] for name in SENSOR_ORDER]
+        print(f"[{_debug_state['n']:02d}] raw={[round(v, 3) for v in raw]} "
+              f"med={sorted(raw)[2]:.3f} "
+              f"signals={[round(v, 3) for v in signals]} total={total:.3f} "
+              f"error={error:.3f} dt={dt:.3f} d={derivative:.3f} "
+              f"corr={correction:.3f} speed={speed:.3f} "
+              f"L={left_speed:.3f} R={right_speed:.3f}",
               flush=True)
-        _debug_count['n'] += 1
+        _debug_state['n'] += 1
     return left_speed, right_speed
 
 
