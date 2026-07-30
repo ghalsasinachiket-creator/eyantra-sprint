@@ -43,7 +43,6 @@ class CoppeliaClient:
         self._send_count = 0
         self._recv_count = 0
         self._freq_warned = False
-        self._raw_sensor_debug_count = 0
 
     # ------------------------------------------------------------------
     # Connection
@@ -135,10 +134,6 @@ class CoppeliaClient:
             except json.JSONDecodeError:
                 continue
             if msg.get("type") == "sensor_update":
-                if self._raw_sensor_debug_count < 5:
-                    print(f"[raw-sensor-packet {self._raw_sensor_debug_count}] {line}",
-                          flush=True)
-                    self._raw_sensor_debug_count += 1
                 self._recv_count += 1
                 latest = msg["sensors"]
             # pick_result / drop_result lines are handled by _wait_for_reply;
